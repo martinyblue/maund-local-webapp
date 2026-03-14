@@ -2,6 +2,7 @@
 
 이 문서는 `컴퓨터를 잘 모르는 사람`도 그대로 따라 할 수 있도록, 아주 자세하게 작성한 사용 설명서입니다.  
 이 프로그램은 `내 컴퓨터 안에서만` 실행되는 로컬 웹앱입니다. 서버에 올리는 방식이 아니라, 내 컴퓨터에서 분석 화면을 열고 사용하는 방식입니다.
+현재 저장소 기준 버전은 `VERSION` 파일에 들어 있으며, 앱 화면 상단과 GitHub 릴리스 태그에서도 같은 버전을 확인할 수 있습니다.
 
 ## 1. 이 프로그램이 하는 일
 
@@ -36,7 +37,20 @@
 GitHub를 잘 모르는 사람도 아래 순서대로 하면 됩니다.  
 이 저장소를 받기 위해 `GitHub 계정`은 꼭 필요하지 않습니다.
 
-### 방법 A. 가장 쉬운 방법: ZIP으로 내려받기
+### 방법 A. 권장 방법: Releases 에서 버전별로 받기
+
+버전이 분명하게 표시된 파일을 받고 싶다면 이 방법이 가장 좋습니다.
+
+1. GitHub 저장소 페이지를 엽니다.
+2. 오른쪽 영역 또는 상단 메뉴에서 `Releases` 를 누릅니다.
+3. 가장 위에 있는 최신 버전을 찾습니다. 예: `v0.1.0`
+4. 해당 버전 페이지를 엽니다.
+5. `Source code (zip)` 또는 따로 첨부된 배포 파일이 있으면 그것을 누릅니다.
+6. 다운로드가 끝나면 `다운로드` 폴더를 엽니다.
+7. ZIP 파일을 더블클릭해 압축을 풉니다.
+8. 압축이 풀린 폴더를 연 뒤 실행 파일을 누릅니다.
+
+### 방법 B. 일반 ZIP으로 내려받기
 
 1. GitHub 저장소 페이지를 엽니다.
 2. 화면 오른쪽 위 또는 파일 목록 위쪽에 있는 초록색 `Code` 버튼을 누릅니다.
@@ -48,7 +62,7 @@ GitHub를 잘 모르는 사람도 아래 순서대로 하면 됩니다.
 8. 그 새 폴더를 엽니다.
 9. 그 안에서 `run_maund_local_app.command` 또는 `run_maund_local_app.bat` 파일을 실행하면 됩니다.
 
-### 방법 B. Git을 아는 사람이 받는 방법
+### 방법 C. Git을 아는 사람이 받는 방법
 
 터미널 또는 명령 프롬프트를 사용할 줄 아는 사람은 저장소 주소로 `git clone` 해도 됩니다.  
 하지만 컴퓨터 사용이 익숙하지 않다면 `방법 A` 를 쓰는 것이 가장 쉽습니다.
@@ -369,7 +383,7 @@ stop_maund_local_app.command
 개발자가 확인할 때는 아래를 사용합니다.
 
 ```bash
-python3 -m unittest tests.test_engine tests.test_web_app
+python3 -m unittest tests.test_engine tests.test_web_app tests.test_version
 ```
 
 ## 14. GitHub에 처음 올리는 방법
@@ -405,6 +419,8 @@ gh auth login --hostname github.com --git-protocol https --web
 - `martinyblue/maund-local-webapp` 저장소가 없으면 새로 만듭니다.
 - 이미 있으면 기존 저장소에 최신 커밋을 푸시합니다.
 - 원격 주소 `origin` 을 해당 GitHub 저장소로 맞춥니다.
+- `VERSION` 파일에 적힌 값을 읽어 `v버전번호` 태그를 만듭니다.
+- GitHub Release 가 없으면 같은 버전으로 Release 도 만듭니다.
 
 ### 4) 다른 사람이 다운로드할 때 알려줄 주소
 
@@ -413,3 +429,23 @@ gh auth login --hostname github.com --git-protocol https --web
 ```text
 https://github.com/martinyblue/maund-local-webapp
 ```
+
+### 5) 다음 업데이트를 버전으로 올리는 방법
+
+예를 들어 다음 버전을 `0.1.1` 로 올리고 싶다면:
+
+```bash
+./scripts/bump_version.sh 0.1.1
+```
+
+그 다음 아래 순서로 진행합니다.
+
+1. `CHANGELOG.md` 에 자동으로 추가된 새 버전 섹션의 내용을 수정합니다.
+2. 코드 변경을 커밋합니다.
+3. 아래 명령으로 GitHub에 올립니다.
+
+```bash
+./scripts/publish_github.sh martinyblue maund-local-webapp
+```
+
+그러면 GitHub에 `v0.1.1` 같은 새 태그와 Release 가 생기고, 사용자는 그 버전을 기준으로 다운로드할 수 있습니다.

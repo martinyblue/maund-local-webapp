@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 from maund_local_app.engine import run_analysis, validate_config
 from maund_local_app.models import AnalysisConfig
 from maund_local_app.presets import EDITOR_PRESETS
+from maund_local_app.version import __version__
 
 
 HOST = "127.0.0.1"
@@ -384,8 +385,19 @@ def _render_page() -> str:
       margin: 0 auto;
       padding: 24px 18px 40px;
     }}
-    h1 {{ margin: 0 0 8px; font-size: 30px; }}
+    h1 {{ margin: 0; font-size: 30px; }}
     h2 {{ margin-top: 0; }}
+    .title-row {{ display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }}
+    .version-badge {{
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      background: #efe4d4;
+      color: var(--accent);
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 700;
+    }}
     .lead {{ margin: 0 0 18px; color: var(--sub); line-height: 1.6; }}
     .card {{
       background: var(--panel);
@@ -461,7 +473,10 @@ def _render_page() -> str:
 </head>
 <body>
   <div class="wrap">
-    <h1>MAUND Local Web App</h1>
+    <div class="title-row">
+      <h1>MAUND Local Web App</h1>
+      <div class="version-badge">Version v{_esc(__version__)}</div>
+    </div>
     <p class="lead">
       이 페이지는 <b>내 컴퓨터 안에서만</b> 실행되는 로컬 분석 화면입니다.<br />
       브라우저가 자동으로 열리지 않으면 주소창을 한 번 클릭한 뒤 <span class="mono">http://127.0.0.1:8501</span> 를 그대로 붙여넣고 Enter를 누르세요.
