@@ -369,5 +369,47 @@ stop_maund_local_app.command
 개발자가 확인할 때는 아래를 사용합니다.
 
 ```bash
-python3 -m unittest tests.test_engine
+python3 -m unittest tests.test_engine tests.test_web_app
+```
+
+## 14. GitHub에 처음 올리는 방법
+
+이 부분은 `저장소 관리자` 만 하면 됩니다. 일반 사용자는 하지 않아도 됩니다.
+
+### 1) GitHub CLI 설치
+
+macOS에서는 Homebrew가 있다면 아래처럼 설치할 수 있습니다.
+
+```bash
+brew install gh
+```
+
+### 2) GitHub 로그인
+
+아래 명령을 실행한 뒤 브라우저에서 로그인과 승인을 완료합니다.
+
+```bash
+gh auth login --hostname github.com --git-protocol https --web
+```
+
+### 3) 저장소 생성과 첫 푸시
+
+기본 저장소 이름은 `maund-local-webapp` 입니다.
+
+```bash
+./scripts/publish_github.sh martinyblue maund-local-webapp
+```
+
+이 명령은 다음을 한 번에 처리합니다.
+
+- `martinyblue/maund-local-webapp` 저장소가 없으면 새로 만듭니다.
+- 이미 있으면 기존 저장소에 최신 커밋을 푸시합니다.
+- 원격 주소 `origin` 을 해당 GitHub 저장소로 맞춥니다.
+
+### 4) 다른 사람이 다운로드할 때 알려줄 주소
+
+푸시가 끝나면 아래 주소를 다른 사람에게 전달하면 됩니다.
+
+```text
+https://github.com/martinyblue/maund-local-webapp
 ```
