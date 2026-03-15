@@ -2,23 +2,26 @@ from __future__ import annotations
 
 import html
 import os
+import re
 import subprocess
 import sys
 import threading
 import webbrowser
-from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from maund_local_app.engine import run_analysis, validate_config
-from maund_local_app.models import AnalysisConfig
+from maund_local_app.io_utils import parse_desired_products
+from maund_local_app.models import AnalysisConfig, BlockOverride, ValidationResult
 from maund_local_app.presets import EDITOR_PRESETS
 from maund_local_app.version import __version__
 
 
 HOST = "127.0.0.1"
 PORT = 8501
+BLOCK_NAME_PREFIX = "block_name_"
+DESIRED_PRODUCTS_PREFIX = "desired_products_"
 
 FIELD_DEFAULTS = {
     "fastq_dir": str(Path.home() / "Downloads"),
@@ -32,6 +35,7 @@ FIELD_DEFAULTS = {
     "exclude_scope": "",
     "target_seq": "",
     "editor_type": "taled",
+    "analysis_mode": "single_target",
 }
 
 PICKER_FIELDS = {
@@ -69,11 +73,18 @@ def _clear_result_state() -> None:
     STATE["logs"] = []
 
 
+def _is_block_override_field(key: str) -> bool:
+    return key.startswith(BLOCK_NAME_PREFIX) or key.startswith(DESIRED_PRODUCTS_PREFIX)
+
+
 def _save_form(data: dict[str, str]) -> None:
     form = _form()
     for key in FIELD_DEFAULTS:
         if key in data:
             form[key] = data[key].strip()
+    for key, value in data.items():
+        if _is_block_override_field(key):
+            form[key] = value.strip()
     STATE["form"] = form
 
 
@@ -97,6 +108,28 @@ def _parse_scope(text: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
+def _parse_block_overrides(form: dict[str, str]) -> tuple[BlockOverride, ...]:
+    indices: set[int] = set()
+    for key in form:
+        match = re.match(r"^(?:block_name|desired_products)_(\d+)$", key)
+        if match:
+            indices.add(int(match.group(1)))
+
+    overrides: list[BlockOverride] = []
+    for index in sorted(indices):
+        name = form.get(f"{BLOCK_NAME_PREFIX}{index}", "").strip()
+        desired_products = parse_desired_products(form.get(f"{DESIRED_PRODUCTS_PREFIX}{index}", ""))
+        if name or desired_products:
+            overrides.append(
+                BlockOverride(
+                    block_index=index,
+                    block_name=name,
+                    desired_products=desired_products,
+                )
+            )
+    return tuple(overrides)
+
+
 def _build_config_from_form(form: dict[str, str]) -> AnalysisConfig:
     return AnalysisConfig(
         fastq_dir=Path(form["fastq_dir"]),
@@ -107,6 +140,8 @@ def _build_config_from_form(form: dict[str, str]) -> AnalysisConfig:
         exclude_samples=_parse_scope(form["exclude_scope"]),
         target_seq=form["target_seq"].strip().upper(),
         editor_type=form["editor_type"],
+        analysis_mode=form.get("analysis_mode", "single_target"),
+        block_overrides=_parse_block_overrides(form),
         output_base_dir=Path(form["output_base_dir"]),
     )
 
@@ -209,19 +244,88 @@ def _open_path(path: str) -> None:
     subprocess.run(["xdg-open", path], check=False)
 
 
-def _validation_to_text(validation: dict[str, object]) -> str:
-    selected = validation.get("selected_sample_ids", [])
-    fastq_ids = validation.get("available_fastq_ids", [])
-    sequence_ids = validation.get("available_sequence_ids", [])
-    errors = validation.get("errors", [])
-    warnings = validation.get("warnings", [])
+def _validation_value(validation: ValidationResult | dict[str, object] | None, key: str) -> object:
+    if validation is None:
+        return None
+    if isinstance(validation, ValidationResult):
+        return getattr(validation, key)
+    if isinstance(validation, dict):
+        return validation.get(key)
+    return None
+
+
+def _detected_blocks(validation: ValidationResult | dict[str, object] | None) -> list[dict[str, object]]:
+    blocks = _validation_value(validation, "detected_blocks")
+    out: list[dict[str, object]] = []
+    if isinstance(blocks, tuple):
+        blocks = list(blocks)
+    if not isinstance(blocks, list):
+        return out
+    for block in blocks:
+        if hasattr(block, "block_index"):
+            row_items = [{"label": label, "sample_id": sample_id} for label, sample_id in getattr(block, "row_items")]
+            out.append(
+                {
+                    "block_index": getattr(block, "block_index"),
+                    "block_name": getattr(block, "block_name"),
+                    "display_name": getattr(block, "display_name"),
+                    "sample_spec": getattr(block, "sample_spec"),
+                    "target_window": getattr(block, "target_window"),
+                    "desired_products": list(getattr(block, "desired_products")),
+                    "row_items": row_items,
+                }
+            )
+            continue
+        if isinstance(block, dict):
+            row_items = []
+            raw_rows = block.get("row_items", [])
+            if isinstance(raw_rows, list):
+                for item in raw_rows:
+                    if isinstance(item, (list, tuple)) and len(item) >= 2:
+                        row_items.append({"label": item[0], "sample_id": item[1]})
+                    elif isinstance(item, dict):
+                        row_items.append(
+                            {
+                                "label": item.get("label", item.get("row_key", "")),
+                                "sample_id": item.get("sample_id", ""),
+                            }
+                        )
+            display_name = str(block.get("block_name") or f"block_{block.get('block_index', '')}")
+            out.append(
+                {
+                    "block_index": int(block.get("block_index", len(out) + 1)),
+                    "block_name": str(block.get("block_name", "")),
+                    "display_name": display_name,
+                    "sample_spec": str(block.get("sample_spec", "")),
+                    "target_window": str(block.get("target_window", "")),
+                    "desired_products": [str(item) for item in block.get("desired_products", [])],
+                    "row_items": row_items,
+                }
+            )
+    return out
+
+
+def _validation_to_text(validation: ValidationResult | dict[str, object]) -> str:
+    selected = _validation_value(validation, "selected_sample_ids") or []
+    fastq_ids = _validation_value(validation, "available_fastq_ids") or []
+    sequence_ids = _validation_value(validation, "available_sequence_ids") or []
+    errors = _validation_value(validation, "errors") or []
+    warnings = _validation_value(validation, "warnings") or []
+    blocks = _detected_blocks(validation)
 
     lines = [
-        f"유효 여부: {'정상' if validation.get('is_valid') else '오류 있음'}",
+        f"유효 여부: {'정상' if bool(_validation_value(validation, 'is_valid')) else '오류 있음'}",
         "선택된 sample IDs: " + (", ".join(map(str, selected)) if selected else "없음"),
         "FASTQ에 있는 sample IDs: " + (", ".join(map(str, fastq_ids)) if fastq_ids else "없음"),
         "Sequence xlsx에 있는 sample IDs: " + (", ".join(map(str, sequence_ids)) if sequence_ids else "없음"),
     ]
+    if blocks:
+        lines.extend(["", "[감지된 블록]"])
+        for block in blocks:
+            desired = ", ".join(block["desired_products"]) if block["desired_products"] else "없음"
+            lines.append(
+                f"- {block['display_name']}: samples={block['sample_spec']}, target={block['target_window']}, desired={desired}"
+            )
     if errors:
         lines.extend(["", "[오류]"])
         lines.extend(f"- {text}" for text in errors)
@@ -243,7 +347,7 @@ def _picker_rows() -> list[dict[str, str]]:
             "name": "seq_xlsx",
             "label": "Sequence xlsx",
             "button": "파일 선택",
-            "hint": "sample ID, sequence, target window가 들어 있는 xlsx 파일을 선택하세요.",
+            "hint": "기본 분석은 단순 sample/sequence/target 형식도 가능하고, heatmap 분석은 block 구조 xlsx가 필요합니다. block은 1개만 있어도 됩니다.",
         },
         {
             "name": "sample_tale_xlsx",
@@ -261,13 +365,103 @@ def _picker_rows() -> list[dict[str, str]]:
             "name": "output_base_dir",
             "label": "결과 저장 폴더",
             "button": "폴더 선택",
-            "hint": "분석 결과 폴더 `maund_<날짜>`가 생성될 상위 폴더를 선택하세요.",
+            "hint": "분석 결과 폴더 `maund_<날짜>_<시간>` 이 생성될 상위 폴더를 선택하세요.",
         },
     ]
 
 
 def _esc(text: object) -> str:
     return html.escape(str(text))
+
+
+def _mode_options(form: dict[str, str]) -> str:
+    options = [
+        ("single_target", "기본 분석"),
+        ("block_heatmap", "heatmap 분석"),
+    ]
+    chunks = []
+    for value, label in options:
+        selected = "selected" if form.get("analysis_mode", "single_target") == value else ""
+        chunks.append(f'<option value="{_esc(value)}" {selected}>{_esc(label)}</option>')
+    return "".join(chunks)
+
+
+def _render_block_override_section(
+    form: dict[str, str],
+    validation: ValidationResult | dict[str, object] | None,
+) -> str:
+    if form.get("analysis_mode", "single_target") != "block_heatmap":
+        return ""
+    blocks = _detected_blocks(validation)
+    if not blocks:
+        return """
+        <div class="card">
+          <h2>블록 미리보기</h2>
+          <div class="hint">`입력 확인`을 누르면 xlsx에서 감지된 block과 block별 이름/desired product 입력칸이 여기에 표시됩니다. block은 1개여도 됩니다.</div>
+        </div>
+        """
+
+    rows: list[str] = []
+    for block in blocks:
+        index = int(block["block_index"])
+        block_name_key = f"{BLOCK_NAME_PREFIX}{index}"
+        desired_key = f"{DESIRED_PRODUCTS_PREFIX}{index}"
+        desired_default = ", ".join(block["desired_products"])
+        rows.append(
+            f"""
+            <div class="block-box">
+              <div class="block-head">
+                <div class="block-title">{_esc(block['display_name'])}</div>
+                <div class="block-meta">samples {_esc(block['sample_spec'])}</div>
+              </div>
+              <div class="hint">target: <span class="mono">{_esc(block['target_window'])}</span></div>
+              <div class="hint">rows: {_esc(", ".join(f"{item['label']}={item['sample_id']}" for item in block['row_items']))}</div>
+              <div class="row">
+                <label for="{_esc(block_name_key)}">Block 이름</label>
+                <input type="text" id="{_esc(block_name_key)}" name="{_esc(block_name_key)}" value="{_esc(form.get(block_name_key, str(block['display_name'])))}" />
+                <div class="hint">xlsx 이름을 바꾸고 싶을 때만 수정하세요. 비우면 xlsx 또는 자동 이름을 사용합니다.</div>
+              </div>
+              <div class="row">
+                <label for="{_esc(desired_key)}">Desired product sequence</label>
+                <textarea id="{_esc(desired_key)}" name="{_esc(desired_key)}" rows="3">{_esc(form.get(desired_key, desired_default))}</textarea>
+                <div class="hint">여러 개면 쉼표 또는 줄바꿈으로 구분하세요. 비우면 xlsx 값 또는 기본값을 사용합니다.</div>
+              </div>
+            </div>
+            """
+        )
+    return f"""
+    <div class="card">
+      <h2>블록 미리보기와 보완 입력</h2>
+      <div class="hint">heatmap 분석에서는 아래 block별 이름과 desired product를 필요할 때만 수정하면 됩니다.</div>
+      {''.join(rows)}
+    </div>
+    """
+
+
+def _render_result_actions(result: dict[str, object]) -> str:
+    key_paths = result.get("key_output_paths", {})
+    if not isinstance(key_paths, dict):
+        return ""
+
+    buttons = [
+        '<form method="post" action="/open/run_dir" style="display:inline;"><button type="submit">결과 폴더 열기</button></form>'
+    ]
+
+    report_keys = sorted(key for key in key_paths if key == "html_report" or key.startswith("report_"))
+    for key in report_keys:
+        if key == "html_report":
+            label = "HTML 결과 열기"
+        else:
+            label = f"{key.removeprefix('report_').upper()} HTML 열기"
+        buttons.append(
+            f'<form method="post" action="/open/{_esc(key)}" style="display:inline;"><button type="submit" class="secondary">{_esc(label)}</button></form>'
+        )
+
+    if "analysis_flow" in key_paths:
+        buttons.append(
+            '<form method="post" action="/open/analysis_flow" style="display:inline;"><button type="submit" class="ghost">분석 메모 열기</button></form>'
+        )
+    return "".join(buttons)
 
 
 def _render_page() -> str:
@@ -308,7 +502,7 @@ def _render_page() -> str:
                 )
 
     validation_block = ""
-    if isinstance(validation, dict):
+    if isinstance(validation, (ValidationResult, dict)):
         validation_block = f"""
         <div class="card">
           <h2>입력 확인 결과</h2>
@@ -346,12 +540,28 @@ def _render_page() -> str:
             {''.join(output_boxes)}
           </div>
           <div class="actions">
-            <form method="post" action="/open/run_dir" style="display:inline;"><button type="submit">결과 폴더 열기</button></form>
-            <form method="post" action="/open/html_report" style="display:inline;"><button type="submit" class="secondary">HTML 결과 열기</button></form>
-            <form method="post" action="/open/analysis_flow" style="display:inline;"><button type="submit" class="ghost">분석 메모 열기</button></form>
+            {_render_result_actions(result)}
           </div>
         </div>
         """
+
+    target_block = """
+          <div class="row">
+            <label for="target_seq">Target sequence</label>
+            <input type="text" id="target_seq" name="target_seq" value="{target_value}" />
+            <div class="hint">분석할 target sequence를 그대로 붙여넣으세요. 예: <span class="mono">AAATGAATCTGCTAATGAA</span></div>
+          </div>
+    """.format(target_value=_esc(form["target_seq"]))
+    if form.get("analysis_mode", "single_target") == "block_heatmap":
+        target_block = """
+          <div class="row">
+            <label>Target sequence</label>
+            <input type="text" value="" disabled />
+            <div class="hint">heatmap 분석에서는 target sequence를 직접 입력하지 않습니다. seq xlsx 안의 block target을 사용합니다.</div>
+          </div>
+        """
+
+    block_override_section = _render_block_override_section(form, validation)
 
     return f"""<!doctype html>
 <html lang="ko">
@@ -419,9 +629,9 @@ def _render_page() -> str:
     .grid {{ display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 16px; }}
     .row {{ margin-bottom: 12px; }}
     label {{ display: block; font-weight: 700; margin-bottom: 6px; }}
-    .hint {{ font-size: 12px; color: var(--sub); margin-top: 4px; line-height: 1.5; }}
+    .hint {{ font-size: 12px; color: var(--sub); margin-top: 4px; line-height: 1.5; white-space: pre-wrap; }}
     .picker {{ display: grid; grid-template-columns: 1fr auto; gap: 8px; }}
-    input[type="text"], select {{
+    input[type="text"], select, textarea {{
       width: 100%;
       box-sizing: border-box;
       border: 1px solid var(--line);
@@ -429,6 +639,15 @@ def _render_page() -> str:
       padding: 11px 12px;
       font-size: 14px;
       background: white;
+      font-family: inherit;
+    }}
+    textarea {{
+      resize: vertical;
+      min-height: 82px;
+    }}
+    input[disabled] {{
+      background: #f6f1e8;
+      color: #7a746b;
     }}
     button {{
       border: 0;
@@ -465,6 +684,22 @@ def _render_page() -> str:
     .result-box {{ background: #f4ede2; border-radius: 12px; padding: 12px; }}
     .result-box .title {{ font-size: 12px; color: var(--sub); margin-bottom: 6px; }}
     .result-box .value {{ word-break: break-all; font-size: 14px; }}
+    .block-box {{
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fbf7f0;
+      padding: 14px;
+      margin-top: 10px;
+    }}
+    .block-head {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: baseline;
+      flex-wrap: wrap;
+    }}
+    .block-title {{ font-size: 17px; font-weight: 700; }}
+    .block-meta {{ color: var(--sub); font-size: 13px; }}
     @media (max-width: 880px) {{
       .grid {{ grid-template-columns: 1fr; }}
       .picker {{ grid-template-columns: 1fr; }}
@@ -482,20 +717,30 @@ def _render_page() -> str:
       브라우저가 자동으로 열리지 않으면 주소창을 한 번 클릭한 뒤 <span class="mono">http://127.0.0.1:8501</span> 를 그대로 붙여넣고 Enter를 누르세요.
     </p>
     <div class="steps">
-      <div class="step"><div class="num">STEP 1</div><div class="txt">각 입력칸 오른쪽의 <b>선택</b> 버튼을 누르면 Finder 또는 파일 선택창이 뜹니다. 이때 브라우저가 잠깐 로딩처럼 보여도 정상입니다.</div></div>
-      <div class="step"><div class="num">STEP 2</div><div class="txt"><b>입력 확인</b> 버튼을 눌러 오류가 없는지 확인합니다.</div></div>
-      <div class="step"><div class="num">STEP 3</div><div class="txt"><b>분석 실행</b> 버튼을 누른 뒤 완료될 때까지 기다립니다. 분석 중에는 브라우저 탭을 닫지 않는 것이 안전합니다.</div></div>
-      <div class="step"><div class="num">STEP 4</div><div class="txt">완료되면 <b>결과 폴더 열기</b> 또는 <b>HTML 결과 열기</b> 버튼으로 결과를 바로 확인합니다.</div></div>
+      <div class="step"><div class="num">STEP 1</div><div class="txt">각 입력칸 오른쪽의 <b>선택</b> 버튼을 누르면 Finder 또는 파일 선택창이 뜹니다. 잠깐 로딩처럼 보여도 정상입니다.</div></div>
+      <div class="step"><div class="num">STEP 2</div><div class="txt"><b>입력 확인</b> 버튼을 눌러 오류가 없는지 확인합니다. heatmap 분석은 이 단계에서 block 미리보기가 생깁니다.</div></div>
+      <div class="step"><div class="num">STEP 3</div><div class="txt"><b>분석 실행</b> 버튼을 누른 뒤 완료될 때까지 기다립니다. block마다 별도 HTML 결과가 만들어집니다.</div></div>
+      <div class="step"><div class="num">STEP 4</div><div class="txt">완료되면 <b>결과 폴더 열기</b> 또는 block별 <b>HTML 열기</b> 버튼으로 결과를 바로 확인합니다.</div></div>
     </div>
 
     <form method="post" action="/action">
       <div class="grid">
-        <div class="card">
-          <h2>입력 파일과 폴더</h2>
-          {''.join(picker_rows_html)}
+        <div>
+          <div class="card">
+            <h2>입력 파일과 폴더</h2>
+            {''.join(picker_rows_html)}
+          </div>
+          {block_override_section}
         </div>
         <div class="card">
           <h2>분석 설정</h2>
+          <div class="row">
+            <label for="analysis_mode">분석 모드</label>
+            <select id="analysis_mode" name="analysis_mode">
+              {_mode_options(form)}
+            </select>
+            <div class="hint">기본 분석은 기존 방식이고, heatmap 분석은 xlsx 안의 block을 자동 감지해 block별 HTML과 heatmap을 만듭니다. block은 1개만 있어도 됩니다.</div>
+          </div>
           <div class="row">
             <label for="sample_scope">분석할 샘플 번호</label>
             <input type="text" id="sample_scope" name="sample_scope" value="{_esc(form['sample_scope'])}" />
@@ -506,11 +751,7 @@ def _render_page() -> str:
             <input type="text" id="exclude_scope" name="exclude_scope" value="{_esc(form['exclude_scope'])}" />
             <div class="hint">예시: <span class="mono">73,74</span>. 제외할 샘플만 적으세요.</div>
           </div>
-          <div class="row">
-            <label for="target_seq">Target sequence</label>
-            <input type="text" id="target_seq" name="target_seq" value="{_esc(form['target_seq'])}" />
-            <div class="hint">분석할 target sequence를 그대로 붙여넣으세요. 예: <span class="mono">AAATGAATCTGCTAATGAA</span></div>
-          </div>
+          {target_block}
           <div class="row">
             <label for="editor_type">Editor type</label>
             <select id="editor_type" name="editor_type">
@@ -576,11 +817,19 @@ def _handle_action(data: dict[str, str]) -> None:
         return
 
     validation = validate_config(config)
-    STATE["validation"] = asdict(validation)
+    STATE["validation"] = validation
 
     if action == "validate":
         if validation.is_valid:
-            messages.append({"kind": "ok", "text": "입력 확인이 끝났습니다. 이제 '분석 실행'을 눌러도 됩니다."})
+            if config.analysis_mode == "block_heatmap":
+                messages.append(
+                    {
+                        "kind": "ok",
+                        "text": f"입력 확인이 끝났습니다. 감지된 block은 {len(validation.detected_blocks)}개입니다. 필요하면 block 이름/desired product를 수정한 뒤 분석 실행을 누르세요.",
+                    }
+                )
+            else:
+                messages.append({"kind": "ok", "text": "입력 확인이 끝났습니다. 이제 '분석 실행'을 눌러도 됩니다."})
         else:
             messages.append({"kind": "err", "text": "입력 오류가 있습니다. 아래 '입력 확인 결과'를 보고 수정하세요."})
         _set_messages(messages)
@@ -611,7 +860,12 @@ def _handle_action(data: dict[str, str]) -> None:
             "warnings": list(result.warnings),
             "key_output_paths": {key: str(path) for key, path in result.key_output_paths.items()},
         }
-        messages.append({"kind": "ok", "text": "분석이 완료되었습니다. 아래 결과 영역에서 폴더와 HTML을 바로 열 수 있습니다."})
+        if config.analysis_mode == "block_heatmap":
+            messages.append(
+                {"kind": "ok", "text": "분석이 완료되었습니다. 아래에서 결과 폴더와 block별 HTML 리포트를 바로 열 수 있습니다."}
+            )
+        else:
+            messages.append({"kind": "ok", "text": "분석이 완료되었습니다. 아래 결과 영역에서 폴더와 HTML을 바로 열 수 있습니다."})
         for warning in result.warnings:
             messages.append({"kind": "warn", "text": warning})
         _set_messages(messages)

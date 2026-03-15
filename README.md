@@ -6,7 +6,12 @@
 
 ## 1. 이 프로그램이 하는 일
 
-이 프로그램은 다음 입력을 받아서 MAUND 분석 결과를 만들어 줍니다.
+이 프로그램은 두 가지 방식으로 MAUND 분석 결과를 만들어 줍니다.
+
+### 방식 1. 기본 분석
+
+기존에 사용하던 일반 MAUND 방식입니다.  
+한 번에 하나의 target sequence를 기준으로 분석합니다.
 
 - FASTQ 폴더
 - sequence xlsx 파일
@@ -16,7 +21,35 @@
 - target sequence
 - editor type
 
+### 방식 2. heatmap 분석
+
+`N234`, `F260` 처럼 block 구조가 들어 있는 xlsx를 읽어서 block별로 따로 분석합니다.  
+block은 여러 개여도 되고, `N234` 하나만 있어도 됩니다.  
+이 방식에서는 block마다 별도 HTML 파일이 만들어지고, 그 HTML 안에 `기존 분석 결과 + 새 heatmap` 이 함께 들어갑니다.
+
+- FASTQ 폴더
+- sequence xlsx 파일
+- sample TALE xlsx 파일
+- TALE array xlsx 파일
+- sample 번호 범위 또는 제외 번호
+- editor type
+- block 이름과 desired product sequence 보완값(필요할 때만)
+
 실행이 끝나면 내 컴퓨터 안에 결과 폴더가 생깁니다.  
+결과 폴더 이름은 아래처럼 날짜와 시간이 함께 들어갑니다.
+
+```text
+maund_260315_153045
+```
+
+즉:
+
+- `260315` 는 날짜
+- `153045` 는 생성 시간
+
+입니다.  
+같은 날 여러 번 돌려도 시간이 다르면 서로 다른 새 폴더가 만들어집니다.
+
 결과 폴더 안에는 보통 다음 항목이 들어 있습니다.
 
 - `merged_fastq`
@@ -31,6 +64,19 @@
 - `haplotype_render_rows_<editor>_<targetslug>_<tag>.tsv`
 - `haplotype_colored_by_combo_<editor>_<targetslug>_<tag>.html`
 - `analysis_flow_<tag>.md`
+
+heatmap 분석일 때는 block마다 아래 파일도 각각 따로 생깁니다.
+
+- `sample_editing_n234_<tag>.tsv`
+- `ranked_haplotypes_n234_<tag>.tsv`
+- `heatmap_matrix_n234_<tag>.tsv`
+- `heatmap_detail_n234_<tag>.tsv`
+- `report_n234_<tag>.html`
+- `sample_editing_f260_<tag>.tsv`
+- `ranked_haplotypes_f260_<tag>.tsv`
+- `heatmap_matrix_f260_<tag>.tsv`
+- `heatmap_detail_f260_<tag>.tsv`
+- `report_f260_<tag>.html`
 
 ## 2. GitHub에서 다운로드하는 방법
 
@@ -95,6 +141,85 @@ GitHub를 잘 모르는 사람도 아래 순서대로 하면 됩니다.
   - Left/Right tail sequence 정보
 
 이 두 파일이 없어도 핵심 분석은 가능할 수 있지만, tail mapping 관련 결과는 줄어들 수 있습니다.
+
+### sequence xlsx 형식은 아무거나 써도 되나요?
+
+아니요. `분석 원리` 자체는 하나의 고정 xlsx 형식만 강제하는 것은 아니지만, `현재 앱`은 읽을 수 있는 형식이 정해져 있습니다.
+
+즉:
+
+- 아무 xlsx나 자동으로 이해하는 구조는 아닙니다.
+- 현재 앱이 읽을 수 있는 형식으로 정리되어 있어야 합니다.
+
+### 기본 분석용 sequence xlsx 형식
+
+기본 분석은 예전처럼 비교적 단순한 형식도 읽을 수 있습니다.
+
+최소한 아래 정보가 있어야 합니다.
+
+- sample ID 범위
+- full sequence
+- target window
+
+예를 들면 아래와 비슷한 구조입니다.
+
+```text
+sample ID NO. | sequence | target window
+71,72,75~85   | ...      | GCTCACGGTTATTTTGGCCGAT
+86~90         | ...      | GGGCATTACTTGAATGCTACTGCGGGT
+```
+
+### heatmap 분석용 sequence xlsx 형식
+
+heatmap 분석은 `block 구조`를 기대합니다.  
+중요한 점은 `block이 여러 개여야 한다`가 아니라, `block 구조로 적혀 있어야 한다`는 것입니다.
+
+즉 아래 정보가 block 단위로 있어야 합니다.
+
+- block 이름 또는 구분 가능한 제목
+- sample 범위
+- full sequence
+- target window
+- 아래쪽에 row label과 sample ID 목록
+
+예를 들면 아래처럼 이해하면 됩니다.
+
+```text
+[Block 1]
+sample ID NO. | sequence | target window
+49~67         | ...      | AAATGAATCTGCTAATGAA
+
+row label | sample ID
+R1L2      | 49
+R1L3      | 50
+...
+Col0(WT)  | 67
+```
+
+이런 block이 하나만 있어도 heatmap 분석은 정상 동작합니다.  
+즉 `N234` block 하나만 들어 있는 xlsx도 괜찮습니다.
+
+반대로 현재 heatmap 분석에서 바로 읽지 못하는 경우는 다음과 같습니다.
+
+- sample 범위, sequence, target window만 있고 row label/sample ID 목록이 없는 경우
+- block 경계가 보이지 않아서 어떤 sample들이 한 heatmap row 집합인지 알 수 없는 경우
+
+### 사용자가 새 heatmap용 xlsx를 만들 때 꼭 포함해야 할 것
+
+새 xlsx를 직접 만들거나 정리해서 넣을 때는 아래를 넣으면 됩니다.
+
+- block 이름
+- sample 범위
+- full sequence
+- target window
+- row label
+- sample ID
+
+선택 사항:
+
+- desired product sequence
+
+desired product sequence가 없어도 실행은 가능하지만, heatmap HTML 제목과 강조 정보가 더 단순하게 표시될 수 있습니다.
 
 ## 4. macOS에서 실행하는 방법
 
@@ -216,9 +341,33 @@ http://127.0.0.1:8501
 #### 5) 결과 저장 폴더
 
 - 분석 결과가 저장될 상위 폴더를 선택합니다.
-- 예를 들어 Desktop을 선택하면, 그 안에 `maund_<날짜>` 폴더가 생깁니다.
+- 예를 들어 Desktop을 선택하면, 그 안에 `maund_<날짜>_<시간>` 폴더가 생깁니다.
 
 ### STEP 2. 분석 설정 입력하기
+
+#### 0) 분석 모드 먼저 고르기
+
+화면의 `분석 모드` 에서 아래 둘 중 하나를 선택합니다.
+
+- `기본 분석`
+- `heatmap 분석`
+
+두 모드 차이는 다음과 같습니다.
+
+##### 기본 분석
+
+- 기존 방식입니다.
+- `Target sequence` 를 직접 입력해야 합니다.
+- 결과 HTML은 기존 haplotype 카드 중심으로 나옵니다.
+
+##### heatmap 분석
+
+- xlsx 안에 들어 있는 block을 자동으로 감지합니다.
+- block은 1개만 있어도 됩니다.
+- `Target sequence` 를 직접 입력하지 않습니다.
+- block별로 결과 파일이 따로 만들어집니다.
+- block별 HTML 안에 `기존 결과 + heatmap` 이 함께 보입니다.
+- `입력 확인` 버튼을 먼저 눌러야 block 미리보기가 나타납니다.
 
 #### 1) 분석할 샘플 번호
 
@@ -253,6 +402,7 @@ http://127.0.0.1:8501
 
 #### 3) Target sequence
 
+`기본 분석` 일 때만 사용하는 칸입니다.  
 분석할 target sequence를 그대로 붙여넣습니다.
 
 예시:
@@ -260,6 +410,9 @@ http://127.0.0.1:8501
 ```text
 AAATGAATCTGCTAATGAA
 ```
+
+`heatmap 분석` 을 선택했을 때 이 칸이 비활성화되어 보이면 정상입니다.  
+이 경우 target은 xlsx 안의 block 정보에서 자동으로 가져옵니다.
 
 #### 4) Editor type
 
@@ -281,8 +434,36 @@ AAATGAATCTGCTAATGAA
 - 선택된 sample IDs
 - FASTQ에 실제로 있는 sample IDs
 - sequence xlsx에 실제로 있는 sample IDs
+- 감지된 block 목록(heatmap 분석일 때)
 - 오류 메시지
 - 경고 메시지
+
+### heatmap 분석에서 block 미리보기가 보이면 무엇을 해야 하나요?
+
+`heatmap 분석` 을 선택한 뒤 `입력 확인` 을 누르면, 화면에 `블록 미리보기와 보완 입력` 영역이 나타날 수 있습니다.
+
+이 영역에서는:
+
+- 감지된 block 이름 확인
+- sample 범위 확인
+- target window 확인
+- desired product sequence 확인
+- block 이름 수정
+- desired product sequence 추가 또는 수정
+
+을 할 수 있습니다.
+
+desired product sequence를 여러 개 적고 싶다면:
+
+- 쉼표로 구분하거나
+- 한 줄에 하나씩 적으면 됩니다.
+
+예:
+
+```text
+AAATGAATCTGCTGATGAA
+AAATGAATCTGCTAGTGAA
+```
 
 ### 오류가 있으면 어떻게 하나요?
 
@@ -331,8 +512,20 @@ AAATGAATCTGCTAATGAA
 
 ### HTML 결과 열기
 
-- `HTML 결과 열기` 버튼을 누르면
-- 색이 들어간 haplotype 결과 HTML이 열립니다.
+- `기본 분석` 일 때는 `HTML 결과 열기` 버튼이 보입니다.
+- `heatmap 분석` 일 때는 `N234 HTML 열기`, `F260 HTML 열기` 처럼 block 이름이 들어간 버튼이 각각 보입니다.
+
+이 버튼을 누르면 해당 block의 결과 HTML이 열립니다.
+
+heatmap 분석의 block HTML 안에는 다음 내용이 한 번에 같이 들어 있습니다.
+
+- block summary
+- per-sample editing summary
+- ranked editing table
+- haplotype cards
+- position heatmap
+
+즉, 예를 들어 `N234 HTML` 을 열면 `N234의 기존 MAUND 결과` 와 `N234 heatmap` 을 한 화면에서 같이 볼 수 있습니다.
 
 ### 분석 메모 열기
 
@@ -364,7 +557,32 @@ stop_maund_local_app.command
 
 프로그램을 실행했던 검은 창(Command Prompt)을 닫으면 됩니다.
 
-## 12. 실행 파일로 묶고 싶을 때
+## 12. heatmap 분석을 실제로 하는 순서
+
+이 항목은 `N234`, `F260` 처럼 block 구조가 들어 있는 xlsx를 분석할 때를 기준으로 설명합니다. block은 1개만 있어도 됩니다.
+
+1. 프로그램을 실행합니다.
+2. `FASTQ 폴더` 를 선택합니다.
+3. `Sequence xlsx` 를 선택합니다.
+4. 필요하면 `Sample TALE xlsx`, `TALE array xlsx` 를 선택합니다.
+5. `결과 저장 폴더` 를 선택합니다.
+6. `분석 모드` 에서 `heatmap 분석` 을 고릅니다.
+7. 필요한 경우 `분석할 샘플 번호` 또는 `제외할 샘플 번호` 를 입력합니다.
+8. `입력 확인` 버튼을 누릅니다.
+9. 화면 아래 `블록 미리보기와 보완 입력` 영역이 나타나는지 확인합니다.
+10. block 이름 또는 desired product sequence를 바꾸고 싶으면 여기서 수정합니다.
+11. `분석 실행` 버튼을 누릅니다.
+12. 완료되면 `결과 폴더 열기` 또는 block별 `HTML 열기` 버튼을 누릅니다.
+
+heatmap 읽는 방법:
+
+- 세로축 행: sample 또는 TALE 조합
+- 가로축 열: target window의 각 위치
+- 셀 숫자: 해당 위치의 intended conversion frequency(%)
+- 색상: 0%에 가까우면 연한색, 5% 이상은 가장 진한색으로 보이도록 잘라서 표시
+- 원하는 위치는 heatmap에서 더 눈에 띄게 표시됩니다.
+
+## 13. 실행 파일로 묶고 싶을 때
 
 ### macOS
 
@@ -378,7 +596,7 @@ stop_maund_local_app.command
 ./scripts/build_windows_app.ps1
 ```
 
-## 13. 테스트
+## 14. 테스트
 
 개발자가 확인할 때는 아래를 사용합니다.
 
@@ -386,7 +604,7 @@ stop_maund_local_app.command
 python3 -m unittest tests.test_engine tests.test_web_app tests.test_version
 ```
 
-## 14. GitHub에 처음 올리는 방법
+## 15. GitHub에 처음 올리는 방법
 
 이 부분은 `저장소 관리자` 만 하면 됩니다. 일반 사용자는 하지 않아도 됩니다.
 

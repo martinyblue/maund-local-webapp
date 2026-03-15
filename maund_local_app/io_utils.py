@@ -7,10 +7,33 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Iterable
 
+from .models import BlockOverride, BlockSpec
+
 
 NS = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 DNA_BASES = {"A", "C", "G", "T", "N"}
+BLOCK_HINTS: dict[tuple[str, str], dict[str, tuple[str, ...] | str]] = {
+    (
+        "49~67",
+        "AAATGAATCTGCTAATGAA",
+    ): {
+        "name": "N234",
+        "desired_products": (
+            "AAATGAATCTGCTGATGAA",
+            "AAATGAATCTGCTAGTGAA",
+        ),
+    },
+    (
+        "74~93,95,96",
+        "TTGGCCGATTGATTTTCCAATA",
+    ): {
+        "name": "F260",
+        "desired_products": (
+            "TTGGCCGATTGATTTCCCAATA",
+        ),
+    },
+}
 
 
 def col_to_idx(col_letters: str) -> int:
@@ -136,19 +159,172 @@ def normalize_id_row(row: list[str]) -> tuple[str, str, str]:
     return "", "", ""
 
 
-def load_seq_mappings(seq_xlsx: Path) -> dict[int, dict[str, str]]:
+def parse_desired_products(text: str) -> tuple[str, ...]:
+    products: list[str] = []
+    for token in re.split(r"[\n,;/]+", text.strip()):
+        seq = token.strip().upper().replace(" ", "")
+        if is_dna_text(seq):
+            products.append(seq)
+    deduped: list[str] = []
+    for seq in products:
+        if seq not in deduped:
+            deduped.append(seq)
+    return tuple(deduped)
+
+
+def slugify_name(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", text.strip().lower())
+    slug = slug.strip("_")
+    return slug or "block"
+
+
+def _header_is_block_start(row: list[str]) -> bool:
+    return len(row) > 1 and row[1].strip().lower() == "sample id no."
+
+
+def _first_nonempty(*values: str) -> str:
+    for value in values:
+        if value.strip():
+            return value.strip()
+    return ""
+
+
+def _normalize_dna_sequence(text: str) -> str:
+    return text.strip().upper().replace(" ", "")
+
+
+def _desired_products_from_cells(cells: list[str], target_window: str) -> tuple[str, ...]:
+    products: list[str] = []
+    for cell in cells:
+        seq = _normalize_dna_sequence(cell)
+        if len(seq) == len(target_window) and seq and all(base in DNA_BASES for base in seq):
+            products.append(seq)
+    deduped: list[str] = []
+    for seq in products:
+        if seq not in deduped:
+            deduped.append(seq)
+    return tuple(deduped)
+
+
+def _block_hint(sample_spec: str, target_window: str) -> tuple[str, tuple[str, ...]]:
+    hint = BLOCK_HINTS.get((sample_spec, target_window))
+    if not hint:
+        return "", ()
+    return str(hint.get("name", "")), tuple(hint.get("desired_products", ()))  # type: ignore[arg-type]
+
+
+def apply_block_overrides(
+    blocks: tuple[BlockSpec, ...],
+    overrides: tuple[BlockOverride, ...] = (),
+) -> tuple[BlockSpec, ...]:
+    override_by_index = {item.block_index: item for item in overrides}
+    resolved: list[BlockSpec] = []
+    for block in blocks:
+        hint_name, hint_products = _block_hint(block.sample_spec, block.target_window)
+        override = override_by_index.get(block.block_index)
+        block_name = block.block_name or hint_name or f"block_{block.block_index}"
+        desired_products = block.desired_products or hint_products
+        if override:
+            if override.block_name.strip():
+                block_name = override.block_name.strip()
+            if override.desired_products:
+                desired_products = tuple(seq.upper() for seq in override.desired_products)
+        resolved.append(
+            BlockSpec(
+                block_index=block.block_index,
+                block_name=block_name,
+                sample_spec=block.sample_spec,
+                full_sequence=block.full_sequence,
+                target_window=block.target_window,
+                row_items=block.row_items,
+                desired_products=desired_products,
+            )
+        )
+    return tuple(resolved)
+
+
+def load_block_specs(
+    seq_xlsx: Path,
+    overrides: tuple[BlockOverride, ...] = (),
+) -> tuple[BlockSpec, ...]:
     rows = parse_xlsx_rows(seq_xlsx, "Sheet1")
+    blocks: list[BlockSpec] = []
+    idx = 0
+    while idx < len(rows):
+        row = rows[idx]
+        if not _header_is_block_start(row):
+            idx += 1
+            continue
+
+        header_name = row[0].strip() if row and row[0].strip() else ""
+        idx += 1
+        while idx < len(rows) and not any(cell.strip() for cell in rows[idx]):
+            idx += 1
+        if idx >= len(rows):
+            break
+
+        spec_row = rows[idx]
+        sample_spec = spec_row[1].strip() if len(spec_row) > 1 else ""
+        full_sequence = _normalize_dna_sequence(spec_row[2]) if len(spec_row) > 2 else ""
+        target_window = _normalize_dna_sequence(spec_row[3]) if len(spec_row) > 3 else ""
+        block_name = _first_nonempty(header_name, spec_row[0] if spec_row else "")
+        desired_products = _desired_products_from_cells(spec_row[4:], target_window) if len(spec_row) > 4 else ()
+        idx += 1
+
+        row_items: list[tuple[str, int]] = []
+        while idx < len(rows):
+            row = rows[idx]
+            if _header_is_block_start(row):
+                break
+            label = row[1].strip() if len(row) > 1 else ""
+            sample_text = row[2].strip() if len(row) > 2 else ""
+            if label and sample_text.isdigit():
+                row_items.append((label, int(sample_text)))
+            idx += 1
+
+        if sample_spec and full_sequence and target_window and row_items:
+            blocks.append(
+                BlockSpec(
+                    block_index=len(blocks) + 1,
+                    block_name=block_name,
+                    sample_spec=sample_spec,
+                    full_sequence=full_sequence,
+                    target_window=target_window,
+                    row_items=tuple(row_items),
+                    desired_products=desired_products,
+                )
+            )
+
+    return apply_block_overrides(tuple(blocks), overrides)
+
+
+def load_seq_mappings(seq_xlsx: Path) -> dict[int, dict[str, str]]:
     mapping: dict[int, dict[str, str]] = {}
+    blocks = load_block_specs(seq_xlsx)
+    if blocks:
+        for block in blocks:
+            for sample_id in block.sample_ids:
+                mapping[sample_id] = {
+                    "sequence": block.full_sequence,
+                    "target_window": block.target_window,
+                    "block_name": block.display_name,
+                }
+        return mapping
+
+    rows = parse_xlsx_rows(seq_xlsx, "Sheet1")
     for row in rows:
-        sid_spec, col2, col3 = normalize_id_row(row)
-        if not sid_spec or not re.search(r"\d", sid_spec):
+        sample_spec = row[1].strip() if len(row) > 1 else ""
+        sequence = _normalize_dna_sequence(row[2]) if len(row) > 2 else ""
+        target_window = _normalize_dna_sequence(row[3]) if len(row) > 3 else ""
+        if not sample_spec or not re.search(r"\d", sample_spec):
             continue
-        if not (is_dna_text(col2) and is_dna_text(col3)):
+        if not is_dna_text(sequence) or not is_dna_text(target_window):
             continue
-        for sid in parse_id_spec(sid_spec):
-            mapping[sid] = {
-                "sequence": col2.upper(),
-                "target_window": col3.upper(),
+        for sample_id in parse_id_spec(sample_spec.replace(" ", "")):
+            mapping[sample_id] = {
+                "sequence": sequence,
+                "target_window": target_window,
+                "block_name": row[0].strip() if row and row[0].strip() else "",
             }
     return mapping
 

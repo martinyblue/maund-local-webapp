@@ -6,7 +6,7 @@ from pathlib import Path
 
 from maund_workflow.run_pipeline import target_index_in_fragment
 
-from .models import AnalysisConfig, EditorPreset
+from .models import AnalysisConfig, BlockSpec, EditorPreset
 
 
 def escape_html(text: str) -> str:
@@ -176,11 +176,108 @@ def build_sample_reports(
     return per_sample_rows, ranked_rows, render_rows
 
 
-def render_html(
+def intended_base_for_position(ref_base: str, preset: EditorPreset) -> str:
+    for source, target in sorted(preset.allowed_substitutions):
+        if source == ref_base:
+            return target
+    return ""
+
+
+def desired_positions(block: BlockSpec) -> set[int]:
+    positions: set[int] = set()
+    for product in block.desired_products:
+        for idx, (ref_base, desired_base) in enumerate(zip(block.target_window, product), start=1):
+            if ref_base != desired_base:
+                positions.add(idx)
+    return positions
+
+
+def build_heatmap_tables(
+    *,
+    block: BlockSpec,
+    preset: EditorPreset,
+    run_rows: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+    run_rows_by_sample = {int(row["sample_id"]): row for row in run_rows}
+    highlighted_positions = desired_positions(block)
+    matrix_rows: list[dict[str, object]] = []
+    detail_rows: list[dict[str, object]] = []
+    column_specs: list[dict[str, object]] = []
+
+    for idx, ref_base in enumerate(block.target_window, start=1):
+        intended_base = intended_base_for_position(ref_base, preset)
+        column_specs.append(
+            {
+                "position": idx,
+                "ref_base": ref_base,
+                "intended_base": intended_base,
+                "field": f"pos_{idx:02d}_{ref_base}",
+                "is_highlighted": idx in highlighted_positions,
+            }
+        )
+
+    for label, sample_id in block.row_items:
+        row = run_rows_by_sample.get(sample_id)
+        if row is None or int(row["return_code"]) != 0 or not bool(row["same_length_exists"]):
+            continue
+
+        total, hap_counter = parse_same_length_haplotypes(
+            Path(str(row["same_length_file"])),
+            str(row["aseq"]),
+            block.target_window,
+        )
+        row_label = f"{label} (sample {sample_id})"
+        is_wt = "col0" in label.lower() or "wild-type" in label.lower()
+        matrix_row: dict[str, object] = {
+            "sample_id": sample_id,
+            "row_label": row_label,
+            "row_key": label,
+            "is_wt": is_wt,
+            "total_same_length_reads": total,
+        }
+        for spec in column_specs:
+            intended_base = str(spec["intended_base"])
+            intended_reads = 0
+            if intended_base:
+                intended_reads = sum(
+                    count
+                    for haplotype, count in hap_counter.items()
+                    if len(haplotype) >= int(spec["position"]) and haplotype[int(spec["position"]) - 1] == intended_base
+                )
+            pct = (intended_reads / total * 100.0) if total else 0.0
+            matrix_row[str(spec["field"])] = f"{pct:.6f}"
+            detail_rows.append(
+                {
+                    "sample_id": sample_id,
+                    "row_label": row_label,
+                    "row_key": label,
+                    "is_wt": is_wt,
+                    "position": int(spec["position"]),
+                    "ref_base": str(spec["ref_base"]),
+                    "intended_base": intended_base,
+                    "intended_reads": intended_reads,
+                    "total_same_length_reads": total,
+                    "intended_pct": f"{pct:.6f}",
+                    "is_highlighted": bool(spec["is_highlighted"]),
+                }
+            )
+        matrix_rows.append(matrix_row)
+
+    return matrix_rows, detail_rows, column_specs
+
+
+def heatmap_color(pct: float) -> str:
+    clipped = max(0.0, min(5.0, pct)) / 5.0
+    red = int(247 - 44 * clipped)
+    green = int(247 - 74 * clipped)
+    blue = int(247 - 161 * clipped)
+    return f"rgb({red}, {green}, {blue})"
+
+
+def _render_sample_cards(
     *,
     per_sample_rows: list[dict[str, object]],
     render_rows: list[dict[str, object]],
-    title: str,
 ) -> str:
     rows_by_sample: dict[int, list[dict[str, object]]] = {}
     for row in render_rows:
@@ -188,12 +285,11 @@ def render_html(
         rows_by_sample.setdefault(sample_id, []).append(row)
 
     cards: list[str] = []
-    for sample in sorted(per_sample_rows, key=lambda item: int(item["sample_id"])):
+    for sample in per_sample_rows:
         sample_id = int(sample["sample_id"])
         target = str(sample["target_seq"]).upper()
         combo = str(sample["tail_combo"]) or "Unmapped"
         rows = rows_by_sample.get(sample_id, [])
-
         lines = [
             '<div class="card">',
             (
@@ -202,14 +298,13 @@ def render_html(
             ),
             (
                 '<div class="meta">'
-                f'<span>{escape_html(str(render_rows[0]["primary_label"]) if render_rows else "Edited (%)")}: '
-                f'<b>{float(str(sample["edited_pct_allowed_only"])):.4f}</b></span>'
+                f'<span>Edited (%): <b>{float(str(sample["edited_pct_allowed_only"])):.4f}</b></span>'
                 f'<span>Disallowed (%): <b>{float(str(sample["disallowed_mut_pct"])):.4f}</b></span>'
                 f'<span>Total same-length reads: <b>{int(sample["total_same_length_reads"])}</b></span>'
                 "</div>"
             ),
             '<div class="ref">Ref: <span class="seq">' + target + "</span></div>",
-            "<table><thead><tr><th>Rank</th><th>Haplotype (changed bases only)</th><th>Reads</th><th>Edited reads (%)</th></tr></thead><tbody>",
+            "<table><thead><tr><th>Rank</th><th>Haplotype</th><th>Reads</th><th>Edited reads (%)</th></tr></thead><tbody>",
         ]
         if not rows:
             lines.append('<tr><td colspan="4" class="empty">No allowed haplotype found</td></tr>')
@@ -223,8 +318,17 @@ def render_html(
         lines.append("</tbody></table>")
         lines.append("</div>")
         cards.append("\n".join(lines))
+    return "\n".join(cards)
 
+
+def render_html(
+    *,
+    per_sample_rows: list[dict[str, object]],
+    render_rows: list[dict[str, object]],
+    title: str,
+) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cards = _render_sample_cards(per_sample_rows=per_sample_rows, render_rows=render_rows)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -344,7 +448,344 @@ def render_html(
     <h1>{escape_html(title)}</h1>
     <p class="note">Generated at {escape_html(now)}. Only changed bases are colored.</p>
     <div class="grid">
-      {"".join(cards)}
+      {cards}
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
+def render_block_report_html(
+    *,
+    title: str,
+    block: BlockSpec,
+    preset: EditorPreset,
+    per_sample_rows: list[dict[str, object]],
+    ranked_rows: list[dict[str, object]],
+    render_rows: list[dict[str, object]],
+    heatmap_rows: list[dict[str, object]],
+    heatmap_columns: list[dict[str, object]],
+) -> str:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    per_sample_by_id = {int(row["sample_id"]): row for row in per_sample_rows}
+    ranked_by_id = {int(row["sample_id"]): row for row in ranked_rows}
+    desired_text = " or ".join(block.desired_products)
+    summary_rows: list[str] = []
+    ranked_table_rows: list[str] = []
+    row_lookup = {sample_id: label for label, sample_id in block.row_items}
+
+    for label, sample_id in block.row_items:
+        sample = per_sample_by_id.get(sample_id)
+        if sample is None:
+            continue
+        wt_class = " class='wt-row'" if "col0" in label.lower() or "wild-type" in label.lower() else ""
+        summary_rows.append(
+            f"<tr{wt_class}><td>{escape_html(label)}</td><td>{sample_id}</td>"
+            f"<td>{float(str(sample['edited_pct_allowed_only'])):.4f}</td>"
+            f"<td>{float(str(sample['disallowed_mut_pct'])):.4f}</td>"
+            f"<td>{int(sample['total_same_length_reads'])}</td></tr>"
+        )
+
+    for row in ranked_rows:
+        sample_id = int(row["sample_id"])
+        label = row_lookup.get(sample_id, f"sample {sample_id}")
+        ranked_table_rows.append(
+            "<tr>"
+            f"<td>{escape_html(label)}</td><td>{sample_id}</td>"
+            f"<td>{float(str(row['edited_pct_allowed_only'])):.4f}</td>"
+            f"<td>{int(row['edited_reads_allowed_only'])}</td>"
+            f"<td>{int(row['total_same_length_reads'])}</td>"
+            "</tr>"
+        )
+
+    heatmap_rows_html: list[str] = []
+    for row in heatmap_rows:
+        wt_class = " wt-row" if bool(row["is_wt"]) else ""
+        cells = [
+            f"<td class='sticky{wt_class}'>{escape_html(str(row['row_key']))}</td>",
+            f"<td class='sticky2{wt_class}'>{int(row['sample_id'])}</td>",
+        ]
+        for column in heatmap_columns:
+            value = float(str(row[str(column["field"])]))
+            classes = ["heat"]
+            if bool(column["is_highlighted"]):
+                classes.append("focus")
+            cells.append(
+                f"<td class='{' '.join(classes)}' style='background:{heatmap_color(value)}'>{value:.2f}</td>"
+            )
+        heatmap_rows_html.append(f"<tr class='heat-row{wt_class}'>" + "".join(cells) + "</tr>")
+
+    heatmap_header = ["<tr><th class='sticky'>Row</th><th class='sticky2'>Sample</th>"]
+    for column in heatmap_columns:
+        focus = " focus-head" if bool(column["is_highlighted"]) else ""
+        intended_text = f"&rarr;{escape_html(str(column['intended_base']))}" if column["intended_base"] else ""
+        heatmap_header.append(
+            f"<th class='heat-head{focus}'><div>{escape_html(str(column['ref_base']))}</div>"
+            f"<div class='sub'>{int(column['position'])}{intended_text}</div></th>"
+        )
+    heatmap_header.append("</tr>")
+
+    cards = _render_sample_cards(per_sample_rows=per_sample_rows, render_rows=render_rows)
+    desired_note = (
+        f"<div class='product'>Desired products: {escape_html(desired_text)}</div>"
+        if desired_text
+        else "<div class='product'>Desired products: not provided</div>"
+    )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{escape_html(title)}</title>
+  <style>
+    :root {{
+      --bg: #f4f1ea;
+      --ink: #1d2628;
+      --mut: #c33f2c;
+      --card: #fffdf9;
+      --line: #d6c9b8;
+      --sub: #5f655f;
+      --focus: #c7512f;
+      --wt: #f5f0e7;
+    }}
+    body {{
+      margin: 0;
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top right, rgba(211, 179, 117, 0.18), transparent 32%),
+        linear-gradient(180deg, #f7f2ea 0%, #f2ede4 100%);
+      color: var(--ink);
+    }}
+    .wrap {{
+      max-width: 1600px;
+      margin: 0 auto;
+      padding: 24px 18px 36px;
+    }}
+    h1 {{
+      margin: 0 0 8px;
+      font-size: 30px;
+    }}
+    h2 {{
+      margin: 0 0 12px;
+      font-size: 20px;
+    }}
+    .note, .product {{
+      color: var(--sub);
+      margin: 0 0 8px;
+      font-size: 14px;
+      line-height: 1.55;
+    }}
+    .section {{
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: 0 8px 22px rgba(31, 28, 20, 0.06);
+    }}
+    .hero-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }}
+    .hero-box {{
+      background: #f1eadc;
+      border-radius: 12px;
+      padding: 10px 12px;
+    }}
+    .hero-box .k {{
+      color: var(--sub);
+      font-size: 12px;
+      margin-bottom: 4px;
+    }}
+    .hero-box .v {{
+      font-size: 14px;
+      font-weight: 700;
+      word-break: break-all;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }}
+    th, td {{
+      border-top: 1px solid var(--line);
+      padding: 8px 7px;
+      text-align: left;
+      vertical-align: top;
+    }}
+    th {{
+      color: var(--sub);
+      font-weight: 700;
+      background: #fbf7f0;
+    }}
+    .wt-row td {{
+      background: var(--wt);
+    }}
+    .grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+      gap: 14px;
+    }}
+    .card {{
+      background: #fffdfa;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+    }}
+    .card-head {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: baseline;
+      margin-bottom: 10px;
+    }}
+    .sid {{
+      font-size: 18px;
+      font-weight: 700;
+    }}
+    .combo {{
+      color: var(--sub);
+      font-size: 13px;
+      text-align: right;
+    }}
+    .meta {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 10px;
+      font-size: 13px;
+      color: var(--sub);
+    }}
+    .meta span {{
+      background: #f1eadc;
+      border-radius: 999px;
+      padding: 5px 9px;
+    }}
+    .ref {{
+      margin-bottom: 10px;
+      font-size: 13px;
+      color: var(--sub);
+    }}
+    .seq {{
+      font-family: "SFMono-Regular", Consolas, monospace;
+      letter-spacing: 0.3px;
+      word-break: break-all;
+    }}
+    .mut {{
+      color: var(--mut);
+      font-weight: 800;
+    }}
+    .empty {{
+      color: var(--sub);
+      text-align: center;
+    }}
+    .heat-wrap {{
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }}
+    .heatmap {{
+      min-width: 960px;
+    }}
+    .heat-head {{
+      text-align: center;
+      min-width: 54px;
+    }}
+    .focus-head {{
+      box-shadow: inset 0 -2px 0 var(--focus);
+    }}
+    .heat {{
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }}
+    .focus {{
+      box-shadow: inset 0 0 0 2px rgba(199, 81, 47, 0.30);
+      font-weight: 700;
+    }}
+    .sticky, .sticky2 {{
+      position: sticky;
+      left: 0;
+      z-index: 2;
+      background: #fffdfa;
+    }}
+    .sticky2 {{
+      left: 140px;
+      z-index: 2;
+    }}
+    .sticky, .sticky2 {{
+      min-width: 110px;
+    }}
+    .sub {{
+      color: var(--sub);
+      font-size: 11px;
+      font-weight: 400;
+    }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>{escape_html(title)}</h1>
+    <p class="note">Generated at {escape_html(now)}. Existing MAUND outputs and the new heatmap are shown together in this file.</p>
+    <div class="section">
+      <h2>Block Summary</h2>
+      <p class="note">Rule: {escape_html(preset.allowed_rule_text)}. Heatmap colors are clipped to 0-5%, while cell numbers show the real percentage.</p>
+      {desired_note}
+      <div class="hero-grid">
+        <div class="hero-box"><div class="k">Block</div><div class="v">{escape_html(block.display_name)}</div></div>
+        <div class="hero-box"><div class="k">Sample Scope</div><div class="v">{escape_html(block.sample_spec)}</div></div>
+        <div class="hero-box"><div class="k">Target Window</div><div class="v">{escape_html(block.target_window)}</div></div>
+        <div class="hero-box"><div class="k">Rows</div><div class="v">{len(heatmap_rows)}</div></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Per-sample Editing Summary</h2>
+      <table>
+        <thead>
+          <tr><th>Row</th><th>Sample</th><th>Edited (%)</th><th>Disallowed (%)</th><th>Total same-length reads</th></tr>
+        </thead>
+        <tbody>
+          {"".join(summary_rows)}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>Ranked Editing</h2>
+      <table>
+        <thead>
+          <tr><th>Row</th><th>Sample</th><th>Edited (%)</th><th>Edited reads</th><th>Total same-length reads</th></tr>
+        </thead>
+        <tbody>
+          {"".join(ranked_table_rows)}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>Haplotype Cards</h2>
+      <div class="grid">
+        {cards}
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Position Heatmap</h2>
+      <p class="note">Each cell is the intended conversion frequency at that target-window position.</p>
+      <div class="heat-wrap">
+        <table class="heatmap">
+          <thead>
+            {"".join(heatmap_header)}
+          </thead>
+          <tbody>
+            {"".join(heatmap_rows_html)}
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
 </body>
@@ -359,25 +800,49 @@ def build_analysis_flow_markdown(
     selected_sample_ids: list[int],
     outputs: list[Path],
     warnings: list[str],
+    block_summaries: list[str] | None = None,
 ) -> str:
     lines = [
         f"# Analysis Flow ({config.date_tag})",
         "",
         "## Scope",
+        "- Mode: " + config.analysis_mode,
         "- Samples: " + ",".join(str(sample_id) for sample_id in selected_sample_ids),
-        f"- Target: {config.target_seq.upper()}",
-        f"- Editor: {preset.label}",
-        f"- Rule: {preset.allowed_rule_text}",
-        "",
-        "## Steps",
-        "1. Discover FASTQ pairs and merge with fixed offset (29)",
-        "2. Run MAUND-compatible lite extraction per sample and keep same-length outputs",
-        "3. Count allowed-only OR-edited haplotypes per sample",
-        "4. Build ranked per-sample haplotype tables and HTML cards",
-        "5. Write run notes and reusable table outputs",
-        "",
-        "## Outputs",
     ]
+    if config.analysis_mode == "single_target":
+        lines.extend(
+            [
+                f"- Target: {config.target_seq.upper()}",
+                f"- Editor: {preset.label}",
+                f"- Rule: {preset.allowed_rule_text}",
+                "",
+                "## Steps",
+                "1. Discover FASTQ pairs and merge with fixed offset (29)",
+                "2. Run MAUND-compatible lite extraction per sample and keep same-length outputs",
+                "3. Count allowed-only OR-edited haplotypes per sample",
+                "4. Build ranked per-sample haplotype tables and HTML cards",
+                "5. Write run notes and reusable table outputs",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"- Editor: {preset.label}",
+                f"- Rule: {preset.allowed_rule_text}",
+                "",
+                "## Steps",
+                "1. Parse block definitions from seq xlsx and merge all needed FASTQ pairs",
+                "2. Run MAUND-compatible lite extraction separately for each block target",
+                "3. Write block-specific MAUND tables and combined HTML reports",
+                "4. Compute position-wise intended conversion heatmaps for each block",
+                "5. Save per-block HTML, TSV outputs, and run notes",
+            ]
+        )
+        if block_summaries:
+            lines.extend(["", "## Blocks"])
+            for summary in block_summaries:
+                lines.append(f"- {summary}")
+    lines.extend(["", "## Outputs"])
     for output in outputs:
         lines.append(f"- {output.name}")
     if warnings:

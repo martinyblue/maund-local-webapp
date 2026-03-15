@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 
 from maund_local_app.engine import run_analysis, validate_config
-from maund_local_app.io_utils import parse_id_spec, read_tsv
-from maund_local_app.models import AnalysisConfig
+from maund_local_app.io_utils import load_block_specs, load_seq_mappings, parse_id_spec, read_tsv
+from maund_local_app.models import AnalysisConfig, default_date_tag
 from maund_workflow.run_pipeline import discover_fastq_pairs
 
 
@@ -18,6 +18,30 @@ DOWNLOADS = Path(os.environ.get("MAUND_TEST_INPUT_DIR", str(Path.home() / "Downl
 class ParseHelpersTest(unittest.TestCase):
     def test_parse_id_spec_supports_ranges(self) -> None:
         self.assertEqual(parse_id_spec("71,72,75-77,80~81"), (71, 72, 75, 76, 77, 80, 81))
+
+    def test_default_date_tag_uses_date_and_time(self) -> None:
+        tag = default_date_tag()
+        self.assertRegex(tag, r"^\d{6}_\d{6}$")
+
+    def test_load_seq_mappings_supports_legacy_sheet_layout(self) -> None:
+        legacy_xlsx = DOWNLOADS / "seq정보.xlsx"
+        if not legacy_xlsx.exists():
+            self.skipTest(f"Missing input: {legacy_xlsx}")
+        seq_map = load_seq_mappings(legacy_xlsx)
+        self.assertIn(71, seq_map)
+        self.assertEqual(seq_map[71]["target_window"], "GCTCACGGTTATTTTGGCCGAT")
+
+    def test_load_block_specs_detects_multi_block_sheet(self) -> None:
+        block_xlsx = DOWNLOADS / "seq정보 to 동현 260313.xlsx"
+        if not block_xlsx.exists():
+            self.skipTest(f"Missing input: {block_xlsx}")
+        blocks = load_block_specs(block_xlsx)
+        self.assertEqual([block.display_name for block in blocks], ["N234", "F260"])
+        self.assertEqual(blocks[0].sample_ids[0], 49)
+        self.assertEqual(blocks[0].sample_ids[-1], 67)
+        self.assertEqual(blocks[1].sample_ids[0], 74)
+        self.assertEqual(blocks[1].sample_ids[-1], 96)
+        self.assertNotIn(68, blocks[0].sample_ids)
 
 
 class ValidationTest(unittest.TestCase):
@@ -79,6 +103,63 @@ class RegressionTest(unittest.TestCase):
             for row in golden_rows
         }
         self.assertEqual(actual, golden)
+
+    def test_block_heatmap_validation_detects_blocks(self) -> None:
+        fastq_dir = DOWNLOADS / "조상원 (11)"
+        seq_xlsx = DOWNLOADS / "seq정보 to 동현 260313.xlsx"
+        self._assert_external_inputs(fastq_dir, seq_xlsx)
+
+        config = AnalysisConfig(
+            fastq_dir=fastq_dir,
+            seq_xlsx=seq_xlsx,
+            editor_type="taled",
+            analysis_mode="block_heatmap",
+            output_base_dir=self.tmp_dir,
+        )
+        validation = validate_config(config)
+        self.assertTrue(validation.is_valid, msg="\n".join(validation.errors))
+        self.assertEqual([block.display_name for block in validation.detected_blocks], ["N234", "F260"])
+        self.assertIn(49, validation.selected_sample_ids)
+        self.assertIn(96, validation.selected_sample_ids)
+        self.assertNotIn(68, validation.selected_sample_ids)
+
+    def test_block_heatmap_run_creates_block_specific_outputs(self) -> None:
+        fastq_dir = DOWNLOADS / "조상원 (11)"
+        seq_xlsx = DOWNLOADS / "seq정보 to 동현 260313.xlsx"
+        sample_tale_xlsx = DOWNLOADS / "sample id+ TALE.xlsx"
+        tale_array_xlsx = DOWNLOADS / "TALE-array-Golden Gate assembly (조박사님) arabidopsis.xlsx"
+        self._assert_external_inputs(fastq_dir, seq_xlsx, sample_tale_xlsx, tale_array_xlsx)
+
+        config = AnalysisConfig(
+            fastq_dir=fastq_dir,
+            seq_xlsx=seq_xlsx,
+            sample_tale_xlsx=sample_tale_xlsx,
+            tale_array_xlsx=tale_array_xlsx,
+            editor_type="taled",
+            analysis_mode="block_heatmap",
+            sample_ids=(49, 67, 74, 82),
+            date_tag="991315_120000",
+            output_base_dir=self.tmp_dir,
+        )
+        result = run_analysis(config)
+
+        run_dir_name = result.run_dir.name
+        self.assertEqual(run_dir_name, "maund_991315_120000")
+        self.assertIn("report_n234", result.key_output_paths)
+        self.assertIn("report_f260", result.key_output_paths)
+        self.assertTrue(result.key_output_paths["report_n234"].exists())
+        self.assertTrue(result.key_output_paths["report_f260"].exists())
+        self.assertTrue(result.key_output_paths["heatmap_matrix_n234"].exists())
+        self.assertTrue(result.key_output_paths["heatmap_matrix_f260"].exists())
+
+        html_text = result.key_output_paths["report_n234"].read_text()
+        self.assertIn("Position Heatmap", html_text)
+        self.assertIn("Per-sample Editing Summary", html_text)
+        self.assertIn("Haplotype Cards", html_text)
+
+        heatmap_rows = read_tsv(result.key_output_paths["heatmap_matrix_n234"])
+        self.assertEqual([int(row["sample_id"]) for row in heatmap_rows], [49, 67])
+        self.assertTrue(any(key.startswith("pos_14") for key in heatmap_rows[0].keys()))
 
     def test_regression_260304_style(self) -> None:
         fastq_dir = DOWNLOADS / "조상원 (6)"
