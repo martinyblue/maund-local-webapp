@@ -1,19 +1,36 @@
 from __future__ import annotations
 
+import copy
 import subprocess
 import unittest
 from unittest.mock import patch
 
 from maund_local_app.web_app import (
+    FIELD_DEFAULTS,
+    STATE,
     _build_config_from_form,
     _build_macos_picker_command,
     _build_windows_picker_command,
+    _handle_action,
+    _render_page,
     _run_picker_command,
     _validation_to_text,
 )
 
 
 class PickerHelpersTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._state_backup = copy.deepcopy(STATE)
+        STATE["form"] = dict(FIELD_DEFAULTS)
+        STATE["messages"] = []
+        STATE["validation"] = None
+        STATE["result"] = None
+        STATE["logs"] = []
+
+    def tearDown(self) -> None:
+        STATE.clear()
+        STATE.update(self._state_backup)
+
     def test_build_macos_picker_command_uses_osascript(self) -> None:
         command = _build_macos_picker_command("directory", "/Users/test/Downloads", "폴더를 선택하세요.")
         rendered = " ".join(command)
@@ -97,6 +114,23 @@ class PickerHelpersTest(unittest.TestCase):
         self.assertIn("[경고]", text)
         self.assertIn("[감지된 블록]", text)
         self.assertIn("N234", text)
+
+    def test_handle_action_reports_validation_exception_in_messages(self) -> None:
+        with patch("maund_local_app.web_app.validate_config", side_effect=RuntimeError("boom")):
+            _handle_action(
+                {
+                    **FIELD_DEFAULTS,
+                    "action": "validate",
+                }
+            )
+        messages = STATE["messages"]
+        self.assertIsInstance(messages, list)
+        self.assertIn("입력 확인 중 오류가 발생했습니다.", messages[0]["text"])
+
+    def test_render_page_reads_current_version(self) -> None:
+        with patch("maund_local_app.web_app.get_version", return_value="9.9.9"):
+            page = _render_page()
+        self.assertIn("Version v9.9.9", page)
 
 
 if __name__ == "__main__":

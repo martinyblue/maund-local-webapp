@@ -15,7 +15,7 @@ from maund_local_app.engine import run_analysis, validate_config
 from maund_local_app.io_utils import parse_desired_products
 from maund_local_app.models import AnalysisConfig, BlockOverride, ValidationResult
 from maund_local_app.presets import EDITOR_PRESETS
-from maund_local_app.version import __version__
+from maund_local_app.version import get_version
 
 
 HOST = "127.0.0.1"
@@ -710,7 +710,7 @@ def _render_page() -> str:
   <div class="wrap">
     <div class="title-row">
       <h1>MAUND Local Web App</h1>
-      <div class="version-badge">Version v{_esc(__version__)}</div>
+      <div class="version-badge">Version v{_esc(get_version())}</div>
     </div>
     <p class="lead">
       이 페이지는 <b>내 컴퓨터 안에서만</b> 실행되는 로컬 분석 화면입니다.<br />
@@ -816,7 +816,13 @@ def _handle_action(data: dict[str, str]) -> None:
         _set_messages([{"kind": "err", "text": f"입력값을 해석할 수 없습니다.\n{exc}"}])
         return
 
-    validation = validate_config(config)
+    try:
+        validation = validate_config(config)
+    except Exception as exc:
+        STATE["validation"] = None
+        _set_messages([{"kind": "err", "text": f"입력 확인 중 오류가 발생했습니다.\n{exc}"}])
+        return
+
     STATE["validation"] = validation
 
     if action == "validate":
@@ -891,8 +897,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path in {"/", ""}:
-            body = _render_page().encode("utf-8")
-            self.send_response(200)
+            try:
+                body = _render_page().encode("utf-8")
+            except Exception as exc:
+                body = (
+                    "<!doctype html><html lang='ko'><body><pre>"
+                    + html.escape(f"페이지 렌더링 중 오류가 발생했습니다.\n{exc}")
+                    + "</pre></body></html>"
+                ).encode("utf-8")
+                self.send_response(500)
+            else:
+                self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -912,13 +927,19 @@ class Handler(BaseHTTPRequestHandler):
         data = {key: values[-1] for key, values in parse_qs(raw, keep_blank_values=True).items()}
 
         if parsed.path == "/action":
-            _handle_action(data)
+            try:
+                _handle_action(data)
+            except Exception as exc:
+                _set_messages([{"kind": "err", "text": f"요청 처리 중 오류가 발생했습니다.\n{exc}"}])
             self._redirect("/")
             return
 
         if parsed.path.startswith("/open/"):
             kind = parsed.path.split("/open/", 1)[1]
-            _open_output(kind)
+            try:
+                _open_output(kind)
+            except Exception as exc:
+                _set_messages([{"kind": "err", "text": f"결과를 여는 중 오류가 발생했습니다.\n{exc}"}])
             self._redirect("/")
             return
 
