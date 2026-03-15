@@ -169,6 +169,20 @@ sample ID NO. | sequence | target window
 86~90         | ...      | GGGCATTACTTGAATGCTACTGCGGGT
 ```
 
+sample ID 칸에 짧은 설명이 붙어 있어도 기본 분석에서는 읽을 수 있습니다.
+
+예:
+
+```text
+68(wild type)
+68 (WT)
+68-wt
+```
+
+이 경우 모두 sample `68` 로 해석됩니다.
+
+오늘처럼 `seq정보_260315.xlsx` 처럼 sample `68` 하나만 들어 있는 flat xlsx는 heatmap용이 아니라 `기본 분석용`으로 사용하면 됩니다.
+
 ### heatmap 분석용 sequence xlsx 형식
 
 heatmap 분석은 `block 구조`를 기대합니다.  

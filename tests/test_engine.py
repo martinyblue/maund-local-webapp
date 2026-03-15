@@ -19,6 +19,11 @@ class ParseHelpersTest(unittest.TestCase):
     def test_parse_id_spec_supports_ranges(self) -> None:
         self.assertEqual(parse_id_spec("71,72,75-77,80~81"), (71, 72, 75, 76, 77, 80, 81))
 
+    def test_parse_id_spec_supports_annotated_single_ids(self) -> None:
+        self.assertEqual(parse_id_spec("68(wild type)"), (68,))
+        self.assertEqual(parse_id_spec("68 (WT)"), (68,))
+        self.assertEqual(parse_id_spec("68-wt"), (68,))
+
     def test_default_date_tag_uses_date_and_time(self) -> None:
         tag = default_date_tag()
         self.assertRegex(tag, r"^\d{6}_\d{6}$")
@@ -42,6 +47,14 @@ class ParseHelpersTest(unittest.TestCase):
         self.assertEqual(blocks[1].sample_ids[0], 74)
         self.assertEqual(blocks[1].sample_ids[-1], 96)
         self.assertNotIn(68, blocks[0].sample_ids)
+
+    def test_load_seq_mappings_supports_annotated_flat_sheet_layout(self) -> None:
+        annotated_xlsx = DOWNLOADS / "seq정보_260315.xlsx"
+        if not annotated_xlsx.exists():
+            self.skipTest(f"Missing input: {annotated_xlsx}")
+        seq_map = load_seq_mappings(annotated_xlsx)
+        self.assertEqual(tuple(sorted(seq_map)), (68,))
+        self.assertEqual(seq_map[68]["target_window"], "GCTCACGGTTATTTTGGCCGAT")
 
 
 class ValidationTest(unittest.TestCase):
@@ -160,6 +173,56 @@ class RegressionTest(unittest.TestCase):
         heatmap_rows = read_tsv(result.key_output_paths["heatmap_matrix_n234"])
         self.assertEqual([int(row["sample_id"]) for row in heatmap_rows], [49, 67])
         self.assertTrue(any(key.startswith("pos_14") for key in heatmap_rows[0].keys()))
+
+    def test_validate_config_supports_annotated_single_target_sheet(self) -> None:
+        fastq_dir = DOWNLOADS / "조상원 (11)"
+        seq_xlsx = DOWNLOADS / "seq정보_260315.xlsx"
+        self._assert_external_inputs(fastq_dir, seq_xlsx)
+
+        config = AnalysisConfig(
+            fastq_dir=fastq_dir,
+            seq_xlsx=seq_xlsx,
+            sample_ids=(68,),
+            target_seq="GCTCACGGTTATTTTGGCCGAT",
+            editor_type="taled",
+            analysis_mode="single_target",
+            output_base_dir=self.tmp_dir,
+        )
+        validation = validate_config(config)
+        self.assertTrue(validation.is_valid, msg="\n".join(validation.errors))
+        self.assertEqual(validation.selected_sample_ids, (68,))
+
+    def test_single_target_run_for_sample_68_creates_expected_outputs(self) -> None:
+        fastq_dir = DOWNLOADS / "조상원 (11)"
+        seq_xlsx = DOWNLOADS / "seq정보_260315.xlsx"
+        sample_tale_xlsx = DOWNLOADS / "sample id+ TALE.xlsx"
+        tale_array_xlsx = DOWNLOADS / "TALE-array-Golden Gate assembly (조박사님) arabidopsis.xlsx"
+        self._assert_external_inputs(fastq_dir, seq_xlsx, sample_tale_xlsx, tale_array_xlsx)
+
+        config = AnalysisConfig(
+            fastq_dir=fastq_dir,
+            seq_xlsx=seq_xlsx,
+            sample_tale_xlsx=sample_tale_xlsx,
+            tale_array_xlsx=tale_array_xlsx,
+            sample_ids=(68,),
+            target_seq="GCTCACGGTTATTTTGGCCGAT",
+            editor_type="taled",
+            analysis_mode="single_target",
+            date_tag="991315_130000",
+            output_base_dir=self.tmp_dir,
+        )
+        result = run_analysis(config)
+
+        self.assertEqual(result.run_dir.name, "maund_991315_130000")
+        self.assertIn("per_sample_editing", result.key_output_paths)
+        self.assertIn("html_report", result.key_output_paths)
+        self.assertTrue(result.key_output_paths["per_sample_editing"].exists())
+        self.assertTrue(result.key_output_paths["html_report"].exists())
+        self.assertNotIn("report_n234", result.key_output_paths)
+        self.assertTrue(
+            any("Tail mapping missing for selected sample IDs: 68" in warning for warning in result.warnings),
+            msg=str(result.warnings),
+        )
 
     def test_regression_260304_style(self) -> None:
         fastq_dir = DOWNLOADS / "조상원 (6)"

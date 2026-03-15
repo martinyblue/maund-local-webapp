@@ -2,6 +2,14 @@
 
 이 문서는 GitHub 버전 배포용 변경 이력을 기록합니다.
 
+## [0.1.3] - 2026-03-15
+
+- `68(wild type)` 같은 annotated sample ID를 기본 분석에서 정상적으로 읽도록 파서 수정
+- `seq정보_260315.xlsx` 같은 flat xlsx로 68번 negative control 단일 분석을 실행할 수 있도록 수정
+- 기본 분석 안내 문구와 README에 annotated sample ID 및 68번 single-target 사용법 설명 추가
+- 68번 sample에 tail mapping이 없어도 경고만 남기고 분석은 계속 진행되도록 검증 경로 보강
+- 로컬 앱과 GitHub 릴리스 버전이 `0.1.3`으로 함께 반영되도록 버전 파일 갱신
+
 ## [0.1.2] - 2026-03-15
 
 - `입력 확인` 중 예외가 발생해도 페이지가 끊기지 않고 오류 메시지를 화면에 표시하도록 수정

@@ -49,16 +49,21 @@ def parse_id_spec(spec: str) -> tuple[int, ...]:
         token = part.strip()
         if not token:
             continue
-        sep = "-" if "-" in token else "~" if "~" in token else None
-        if sep:
-            start_text, end_text = token.split(sep, 1)
-            start = int(start_text)
-            end = int(end_text)
+        token_no_paren = re.sub(r"\([^)]*\)", "", token).strip()
+        token_compact = re.sub(r"\s+", "", token_no_paren)
+        range_match = re.fullmatch(r"(\d+)([-~])(\d+)", token_compact)
+        if range_match:
+            start = int(range_match.group(1))
+            end = int(range_match.group(3))
             if end < start:
                 raise ValueError(f"Invalid range: {token}")
             vals.extend(range(start, end + 1))
             continue
-        vals.append(int(token))
+        scalar_match = re.search(r"\d+", token_compact)
+        if scalar_match:
+            vals.append(int(scalar_match.group(0)))
+            continue
+        raise ValueError(f"Invalid sample id token: {token}")
     return tuple(vals)
 
 

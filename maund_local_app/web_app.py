@@ -347,7 +347,7 @@ def _picker_rows() -> list[dict[str, str]]:
             "name": "seq_xlsx",
             "label": "Sequence xlsx",
             "button": "파일 선택",
-            "hint": "기본 분석은 단순 sample/sequence/target 형식도 가능하고, heatmap 분석은 block 구조 xlsx가 필요합니다. block은 1개만 있어도 됩니다.",
+            "hint": "기본 분석은 단순 sample/sequence/target 형식도 가능하고 `68(wild type)` 같은 표기도 읽습니다. heatmap 분석은 block 구조 xlsx가 필요합니다. block은 1개만 있어도 됩니다.",
         },
         {
             "name": "sample_tale_xlsx",
