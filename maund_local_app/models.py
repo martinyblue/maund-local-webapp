@@ -55,6 +55,7 @@ class AnalysisConfig:
     target_seq: str = ""
     editor_type: str = "taled"
     analysis_mode: str = "single_target"
+    heatmap_color_max_pct: float = 5.0
     block_overrides: tuple[BlockOverride, ...] = ()
     date_tag: str = field(default_factory=default_date_tag)
     output_base_dir: Path = Path.cwd()

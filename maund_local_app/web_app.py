@@ -36,6 +36,7 @@ FIELD_DEFAULTS = {
     "target_seq": "",
     "editor_type": "taled",
     "analysis_mode": "single_target",
+    "heatmap_scale_max": "5",
 }
 
 PICKER_FIELDS = {
@@ -141,6 +142,7 @@ def _build_config_from_form(form: dict[str, str]) -> AnalysisConfig:
         target_seq=form["target_seq"].strip().upper(),
         editor_type=form["editor_type"],
         analysis_mode=form.get("analysis_mode", "single_target"),
+        heatmap_color_max_pct=float(form.get("heatmap_scale_max", "5").strip() or "5"),
         block_overrides=_parse_block_overrides(form),
         output_base_dir=Path(form["output_base_dir"]),
     )
@@ -386,6 +388,20 @@ def _mode_options(form: dict[str, str]) -> str:
     return "".join(chunks)
 
 
+def _heatmap_scale_options(form: dict[str, str]) -> str:
+    options = [
+        ("1", "0-1"),
+        ("5", "0-5"),
+        ("100", "0-100"),
+    ]
+    selected_value = form.get("heatmap_scale_max", "5")
+    chunks = []
+    for value, label in options:
+        selected = "selected" if selected_value == value else ""
+        chunks.append(f'<option value="{_esc(value)}" {selected}>{_esc(label)}</option>')
+    return "".join(chunks)
+
+
 def _render_block_override_section(
     form: dict[str, str],
     validation: ValidationResult | dict[str, object] | None,
@@ -558,6 +574,18 @@ def _render_page() -> str:
             <label>Target sequence</label>
             <input type="text" value="" disabled />
             <div class="hint">heatmap 분석에서는 target sequence를 직접 입력하지 않습니다. seq xlsx 안의 block target을 사용합니다.</div>
+          </div>
+        """
+
+    heatmap_scale_block = ""
+    if form.get("analysis_mode", "single_target") == "block_heatmap":
+        heatmap_scale_block = f"""
+          <div class="row">
+            <label for="heatmap_scale_max">Heatmap 색상 범위</label>
+            <select id="heatmap_scale_max" name="heatmap_scale_max">
+              {_heatmap_scale_options(form)}
+            </select>
+            <div class="hint">heatmap 셀 숫자는 실제 %를 그대로 보여주고, 색상만 선택한 범위로 잘라서 표시합니다. 아주 낮은 편집율 차이를 강하게 보려면 <span class="mono">0-1</span>, 현재 데이터처럼 낮은 편집율을 보려면 <span class="mono">0-5</span>, 논문 그림처럼 넓은 범위 기준으로 보려면 <span class="mono">0-100</span>을 고르면 됩니다.</div>
           </div>
         """
 
@@ -752,6 +780,7 @@ def _render_page() -> str:
             <div class="hint">예시: <span class="mono">73,74</span>. 제외할 샘플만 적으세요.</div>
           </div>
           {target_block}
+          {heatmap_scale_block}
           <div class="row">
             <label for="editor_type">Editor type</label>
             <select id="editor_type" name="editor_type">

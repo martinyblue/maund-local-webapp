@@ -266,8 +266,13 @@ def build_heatmap_tables(
     return matrix_rows, detail_rows, column_specs
 
 
-def heatmap_color(pct: float) -> str:
-    clipped = max(0.0, min(5.0, pct)) / 5.0
+def _format_heatmap_scale(scale_max_pct: float) -> str:
+    return f"0-{scale_max_pct:g}%"
+
+
+def heatmap_color(pct: float, scale_max_pct: float) -> str:
+    effective_max = scale_max_pct if scale_max_pct > 0 else 5.0
+    clipped = max(0.0, min(effective_max, pct)) / effective_max
     red = int(247 - 44 * clipped)
     green = int(247 - 74 * clipped)
     blue = int(247 - 161 * clipped)
@@ -466,8 +471,10 @@ def render_block_report_html(
     render_rows: list[dict[str, object]],
     heatmap_rows: list[dict[str, object]],
     heatmap_columns: list[dict[str, object]],
+    heatmap_color_max_pct: float,
 ) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    scale_label = _format_heatmap_scale(heatmap_color_max_pct)
     per_sample_by_id = {int(row["sample_id"]): row for row in per_sample_rows}
     ranked_by_id = {int(row["sample_id"]): row for row in ranked_rows}
     desired_text = " or ".join(block.desired_products)
@@ -512,7 +519,7 @@ def render_block_report_html(
             if bool(column["is_highlighted"]):
                 classes.append("focus")
             cells.append(
-                f"<td class='{' '.join(classes)}' style='background:{heatmap_color(value)}'>{value:.2f}</td>"
+                f"<td class='{' '.join(classes)}' style='background:{heatmap_color(value, heatmap_color_max_pct)}'>{value:.2f}</td>"
             )
         heatmap_rows_html.append(f"<tr class='heat-row{wt_class}'>" + "".join(cells) + "</tr>")
 
@@ -732,13 +739,14 @@ def render_block_report_html(
     <p class="note">Generated at {escape_html(now)}. Existing MAUND outputs and the new heatmap are shown together in this file.</p>
     <div class="section">
       <h2>Block Summary</h2>
-      <p class="note">Rule: {escape_html(preset.allowed_rule_text)}. Heatmap colors are clipped to 0-5%, while cell numbers show the real percentage.</p>
+      <p class="note">Rule: {escape_html(preset.allowed_rule_text)}. Heatmap colors are clipped to {escape_html(scale_label)}, while cell numbers show the real percentage.</p>
       {desired_note}
       <div class="hero-grid">
         <div class="hero-box"><div class="k">Block</div><div class="v">{escape_html(block.display_name)}</div></div>
         <div class="hero-box"><div class="k">Sample Scope</div><div class="v">{escape_html(block.sample_spec)}</div></div>
         <div class="hero-box"><div class="k">Target Window</div><div class="v">{escape_html(block.target_window)}</div></div>
         <div class="hero-box"><div class="k">Rows</div><div class="v">{len(heatmap_rows)}</div></div>
+        <div class="hero-box"><div class="k">Color Scale</div><div class="v">{escape_html(scale_label)}</div></div>
       </div>
     </div>
 
@@ -775,7 +783,7 @@ def render_block_report_html(
 
     <div class="section">
       <h2>Position Heatmap</h2>
-      <p class="note">Each cell is the intended conversion frequency at that target-window position.</p>
+      <p class="note">Each cell is the intended conversion frequency at that target-window position. Colors use the selected {escape_html(scale_label)} scale.</p>
       <div class="heat-wrap">
         <table class="heatmap">
           <thead>
@@ -829,6 +837,7 @@ def build_analysis_flow_markdown(
             [
                 f"- Editor: {preset.label}",
                 f"- Rule: {preset.allowed_rule_text}",
+                f"- Heatmap color scale: {_format_heatmap_scale(config.heatmap_color_max_pct)}",
                 "",
                 "## Steps",
                 "1. Parse block definitions from seq xlsx and merge all needed FASTQ pairs",

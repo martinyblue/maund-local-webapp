@@ -74,17 +74,30 @@ class PickerHelpersTest(unittest.TestCase):
                 "target_seq": "",
                 "editor_type": "taled",
                 "analysis_mode": "block_heatmap",
+                "heatmap_scale_max": "100",
                 "block_name_1": "N234",
                 "desired_products_1": "AAATGAATCTGCTGATGAA,AAATGAATCTGCTAGTGAA",
             }
         )
         self.assertEqual(config.analysis_mode, "block_heatmap")
+        self.assertEqual(config.heatmap_color_max_pct, 100.0)
         self.assertEqual(config.sample_ids, (49, 50))
         self.assertEqual(config.block_overrides[0].block_name, "N234")
         self.assertEqual(
             config.block_overrides[0].desired_products,
             ("AAATGAATCTGCTGATGAA", "AAATGAATCTGCTAGTGAA"),
         )
+
+    def test_render_page_shows_heatmap_scale_selector_in_block_mode(self) -> None:
+        STATE["form"] = {
+            **FIELD_DEFAULTS,
+            "analysis_mode": "block_heatmap",
+            "heatmap_scale_max": "1",
+        }
+        page = _render_page()
+        self.assertIn("Heatmap 색상 범위", page)
+        self.assertIn('<option value="1" selected>', page)
+        self.assertIn(">0-1<", page)
 
     def test_validation_to_text_lists_detected_blocks(self) -> None:
         validation = {

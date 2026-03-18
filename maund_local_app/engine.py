@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -55,6 +56,7 @@ def _normalized_config(config: AnalysisConfig) -> AnalysisConfig:
         target_seq=config.target_seq.strip().upper(),
         editor_type=config.editor_type.strip().lower() or "taled",
         analysis_mode=config.analysis_mode.strip().lower() or DEFAULT_ANALYSIS_MODE,
+        heatmap_color_max_pct=float(config.heatmap_color_max_pct or 5.0),
         output_base_dir=Path(config.output_base_dir).expanduser(),
         date_tag=config.date_tag.strip() or datetime.now().strftime("%y%m%d_%H%M%S"),
     )
@@ -174,6 +176,8 @@ def _single_target_validation(cfg: AnalysisConfig) -> ValidationResult:
         errors.append("Target sequence is required.")
     if cfg.date_tag and not cfg.date_tag.replace("_", "").isalnum():
         errors.append(f"Invalid date_tag: {cfg.date_tag}")
+    if not math.isfinite(cfg.heatmap_color_max_pct) or cfg.heatmap_color_max_pct <= 0:
+        errors.append(f"Heatmap color scale max must be a positive number: {cfg.heatmap_color_max_pct}")
 
     if errors:
         return ValidationResult(
@@ -276,6 +280,8 @@ def _block_heatmap_validation(cfg: AnalysisConfig) -> ValidationResult:
         errors.append(f"TALE array xlsx not found: {cfg.tale_array_xlsx}")
     if cfg.date_tag and not cfg.date_tag.replace("_", "").isalnum():
         errors.append(f"Invalid date_tag: {cfg.date_tag}")
+    if not math.isfinite(cfg.heatmap_color_max_pct) or cfg.heatmap_color_max_pct <= 0:
+        errors.append(f"Heatmap color scale max must be a positive number: {cfg.heatmap_color_max_pct}")
     if errors:
         return ValidationResult(
             is_valid=False,
@@ -902,6 +908,7 @@ def _run_block_heatmap_analysis(cfg: AnalysisConfig, validation: ValidationResul
                 render_rows=render_rows,
                 heatmap_rows=heatmap_rows,
                 heatmap_columns=heatmap_columns,
+                heatmap_color_max_pct=cfg.heatmap_color_max_pct,
             )
         )
 

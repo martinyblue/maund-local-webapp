@@ -150,6 +150,7 @@ class RegressionTest(unittest.TestCase):
             tale_array_xlsx=tale_array_xlsx,
             editor_type="taled",
             analysis_mode="block_heatmap",
+            heatmap_color_max_pct=100.0,
             sample_ids=(49, 67, 74, 82),
             date_tag="991315_120000",
             output_base_dir=self.tmp_dir,
@@ -169,6 +170,7 @@ class RegressionTest(unittest.TestCase):
         self.assertIn("Position Heatmap", html_text)
         self.assertIn("Per-sample Editing Summary", html_text)
         self.assertIn("Haplotype Cards", html_text)
+        self.assertIn("0-100%", html_text)
 
         heatmap_rows = read_tsv(result.key_output_paths["heatmap_matrix_n234"])
         self.assertEqual([int(row["sample_id"]) for row in heatmap_rows], [49, 67])
