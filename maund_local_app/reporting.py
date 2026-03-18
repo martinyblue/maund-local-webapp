@@ -270,6 +270,13 @@ def _format_heatmap_scale(scale_max_pct: float) -> str:
     return f"0-{scale_max_pct:g}%"
 
 
+def _format_heatmap_tick(value: float) -> str:
+    rounded = round(value)
+    if abs(value - rounded) < 1e-9:
+        return str(int(rounded))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
 def heatmap_color(pct: float, scale_max_pct: float) -> str:
     effective_max = scale_max_pct if scale_max_pct > 0 else 5.0
     clipped = max(0.0, min(effective_max, pct)) / effective_max
@@ -475,6 +482,23 @@ def render_block_report_html(
 ) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     scale_label = _format_heatmap_scale(heatmap_color_max_pct)
+    effective_scale = heatmap_color_max_pct if heatmap_color_max_pct > 0 else 5.0
+    legend_ticks = [
+        0.0,
+        effective_scale * 0.25,
+        effective_scale * 0.5,
+        effective_scale * 0.75,
+        effective_scale,
+    ]
+    legend_gradient = ", ".join(
+        [
+            f"{heatmap_color(effective_scale, effective_scale)} 0%",
+            f"{heatmap_color(effective_scale * 0.75, effective_scale)} 25%",
+            f"{heatmap_color(effective_scale * 0.5, effective_scale)} 50%",
+            f"{heatmap_color(effective_scale * 0.25, effective_scale)} 75%",
+            f"{heatmap_color(0.0, effective_scale)} 100%",
+        ]
+    )
     per_sample_by_id = {int(row["sample_id"]): row for row in per_sample_rows}
     ranked_by_id = {int(row["sample_id"]): row for row in ranked_rows}
     desired_text = " or ".join(block.desired_products)
@@ -695,8 +719,60 @@ def render_block_report_html(
       border: 1px solid var(--line);
       border-radius: 12px;
     }}
+    .heatmap-layout {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 120px;
+      gap: 16px;
+      align-items: start;
+    }}
     .heatmap {{
       min-width: 960px;
+    }}
+    .legend-box {{
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fbf7f0;
+      padding: 12px;
+      position: sticky;
+      top: 12px;
+    }}
+    .legend-title {{
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--sub);
+      margin-bottom: 8px;
+    }}
+    .legend-sub {{
+      font-size: 11px;
+      color: var(--sub);
+      margin-bottom: 10px;
+      line-height: 1.45;
+    }}
+    .legend-scale {{
+      display: flex;
+      align-items: stretch;
+      gap: 10px;
+    }}
+    .legend-bar {{
+      width: 24px;
+      min-width: 24px;
+      height: 240px;
+      border-radius: 999px;
+      border: 1px solid rgba(0, 0, 0, 0.08);
+      background: linear-gradient(to top, {legend_gradient});
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.45);
+    }}
+    .legend-labels {{
+      height: 240px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--sub);
+      font-variant-numeric: tabular-nums;
+    }}
+    .legend-labels div {{
+      line-height: 1;
     }}
     .heat-head {{
       text-align: center;
@@ -730,6 +806,28 @@ def render_block_report_html(
       color: var(--sub);
       font-size: 11px;
       font-weight: 400;
+    }}
+    @media (max-width: 1100px) {{
+      .heatmap-layout {{
+        grid-template-columns: 1fr;
+      }}
+      .legend-box {{
+        position: static;
+      }}
+      .legend-scale {{
+        align-items: center;
+      }}
+      .legend-bar {{
+        width: 100%;
+        height: 24px;
+        min-width: 0;
+        background: linear-gradient(to right, {heatmap_color(0.0, effective_scale)} 0%, {heatmap_color(effective_scale * 0.25, effective_scale)} 25%, {heatmap_color(effective_scale * 0.5, effective_scale)} 50%, {heatmap_color(effective_scale * 0.75, effective_scale)} 75%, {heatmap_color(effective_scale, effective_scale)} 100%);
+      }}
+      .legend-labels {{
+        height: auto;
+        width: 100%;
+        flex-direction: row;
+      }}
     }}
   </style>
 </head>
@@ -784,15 +882,27 @@ def render_block_report_html(
     <div class="section">
       <h2>Position Heatmap</h2>
       <p class="note">Each cell is the intended conversion frequency at that target-window position. Colors use the selected {escape_html(scale_label)} scale.</p>
-      <div class="heat-wrap">
-        <table class="heatmap">
-          <thead>
-            {"".join(heatmap_header)}
-          </thead>
-          <tbody>
-            {"".join(heatmap_rows_html)}
-          </tbody>
-        </table>
+      <div class="heatmap-layout">
+        <div class="heat-wrap">
+          <table class="heatmap">
+            <thead>
+              {"".join(heatmap_header)}
+            </thead>
+            <tbody>
+              {"".join(heatmap_rows_html)}
+            </tbody>
+          </table>
+        </div>
+        <div class="legend-box">
+          <div class="legend-title">Color Range</div>
+          <div class="legend-sub">Selected scale {escape_html(scale_label)}. Darker color means higher intended editing frequency.</div>
+          <div class="legend-scale">
+            <div class="legend-bar" aria-hidden="true"></div>
+            <div class="legend-labels">
+              {"".join(f"<div>{escape_html(_format_heatmap_tick(value))}%</div>" for value in legend_ticks)}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>

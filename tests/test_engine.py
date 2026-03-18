@@ -171,6 +171,9 @@ class RegressionTest(unittest.TestCase):
         self.assertIn("Per-sample Editing Summary", html_text)
         self.assertIn("Haplotype Cards", html_text)
         self.assertIn("0-100%", html_text)
+        self.assertIn("Color Range", html_text)
+        self.assertIn("100%", html_text)
+        self.assertIn("50%", html_text)
 
         heatmap_rows = read_tsv(result.key_output_paths["heatmap_matrix_n234"])
         self.assertEqual([int(row["sample_id"]) for row in heatmap_rows], [49, 67])
