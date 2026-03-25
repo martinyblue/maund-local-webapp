@@ -12,7 +12,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from maund_local_app.engine import run_analysis, validate_config
-from maund_local_app.io_utils import parse_desired_products
+from maund_local_app.io_utils import (
+    infer_flat_blocks,
+    load_block_specs,
+    parse_desired_products,
+    parse_scaffold_sequence,
+)
 from maund_local_app.models import AnalysisConfig, BlockOverride, ValidationResult
 from maund_local_app.presets import EDITOR_PRESETS
 from maund_local_app.version import get_version
@@ -22,6 +27,7 @@ HOST = "127.0.0.1"
 PORT = 8501
 BLOCK_NAME_PREFIX = "block_name_"
 DESIRED_PRODUCTS_PREFIX = "desired_products_"
+SCAFFOLD_SEQUENCE_PREFIX = "scaffold_sequence_"
 
 FIELD_DEFAULTS = {
     "fastq_dir": str(Path.home() / "Downloads"),
@@ -37,6 +43,8 @@ FIELD_DEFAULTS = {
     "editor_type": "taled",
     "analysis_mode": "single_target",
     "heatmap_scale_max": "5",
+    "desired_products": "",
+    "scaffold_sequence": "",
 }
 
 PICKER_FIELDS = {
@@ -75,7 +83,17 @@ def _clear_result_state() -> None:
 
 
 def _is_block_override_field(key: str) -> bool:
-    return key.startswith(BLOCK_NAME_PREFIX) or key.startswith(DESIRED_PRODUCTS_PREFIX)
+    return (
+        key.startswith(BLOCK_NAME_PREFIX)
+        or key.startswith(DESIRED_PRODUCTS_PREFIX)
+        or key.startswith(SCAFFOLD_SEQUENCE_PREFIX)
+    )
+
+
+def _editor_family(form: dict[str, str]) -> str:
+    editor_type = form.get("editor_type", "taled").strip().lower()
+    preset = EDITOR_PRESETS.get(editor_type)
+    return preset.analysis_family if preset is not None else "base_editing"
 
 
 def _save_form(data: dict[str, str]) -> None:
@@ -112,7 +130,7 @@ def _parse_scope(text: str) -> tuple[int, ...]:
 def _parse_block_overrides(form: dict[str, str]) -> tuple[BlockOverride, ...]:
     indices: set[int] = set()
     for key in form:
-        match = re.match(r"^(?:block_name|desired_products)_(\d+)$", key)
+        match = re.match(r"^(?:block_name|desired_products|scaffold_sequence)_(\d+)$", key)
         if match:
             indices.add(int(match.group(1)))
 
@@ -120,27 +138,41 @@ def _parse_block_overrides(form: dict[str, str]) -> tuple[BlockOverride, ...]:
     for index in sorted(indices):
         name = form.get(f"{BLOCK_NAME_PREFIX}{index}", "").strip()
         desired_products = parse_desired_products(form.get(f"{DESIRED_PRODUCTS_PREFIX}{index}", ""))
-        if name or desired_products:
+        scaffold_sequence = parse_scaffold_sequence(form.get(f"{SCAFFOLD_SEQUENCE_PREFIX}{index}", ""))
+        if name or desired_products or scaffold_sequence:
             overrides.append(
                 BlockOverride(
                     block_index=index,
                     block_name=name,
                     desired_products=desired_products,
+                    scaffold_sequence=scaffold_sequence,
                 )
             )
     return tuple(overrides)
 
 
 def _build_config_from_form(form: dict[str, str]) -> AnalysisConfig:
+    editor_type = form["editor_type"]
+    analysis_family = _editor_family(form)
     return AnalysisConfig(
         fastq_dir=Path(form["fastq_dir"]),
         seq_xlsx=Path(form["seq_xlsx"]),
-        sample_tale_xlsx=Path(form["sample_tale_xlsx"]) if form["sample_tale_xlsx"] else None,
-        tale_array_xlsx=Path(form["tale_array_xlsx"]) if form["tale_array_xlsx"] else None,
+        sample_tale_xlsx=(
+            None
+            if analysis_family == "prime_editing" or not form["sample_tale_xlsx"]
+            else Path(form["sample_tale_xlsx"])
+        ),
+        tale_array_xlsx=(
+            None
+            if analysis_family == "prime_editing" or not form["tale_array_xlsx"]
+            else Path(form["tale_array_xlsx"])
+        ),
         sample_ids=_parse_scope(form["sample_scope"]),
         exclude_samples=_parse_scope(form["exclude_scope"]),
         target_seq=form["target_seq"].strip().upper(),
-        editor_type=form["editor_type"],
+        editor_type=editor_type,
+        desired_products=parse_desired_products(form.get("desired_products", "")),
+        scaffold_sequence=parse_scaffold_sequence(form.get("scaffold_sequence", "")),
         analysis_mode=form.get("analysis_mode", "single_target"),
         heatmap_color_max_pct=float(form.get("heatmap_scale_max", "5").strip() or "5"),
         block_overrides=_parse_block_overrides(form),
@@ -274,6 +306,7 @@ def _detected_blocks(validation: ValidationResult | dict[str, object] | None) ->
                     "sample_spec": getattr(block, "sample_spec"),
                     "target_window": getattr(block, "target_window"),
                     "desired_products": list(getattr(block, "desired_products")),
+                    "scaffold_sequence": getattr(block, "scaffold_sequence"),
                     "row_items": row_items,
                 }
             )
@@ -301,10 +334,67 @@ def _detected_blocks(validation: ValidationResult | dict[str, object] | None) ->
                     "sample_spec": str(block.get("sample_spec", "")),
                     "target_window": str(block.get("target_window", "")),
                     "desired_products": [str(item) for item in block.get("desired_products", [])],
+                    "scaffold_sequence": str(block.get("scaffold_sequence", "")),
                     "row_items": row_items,
                 }
             )
     return out
+
+
+def _preview_blocks(form: dict[str, str], validation: ValidationResult | dict[str, object] | None) -> list[dict[str, object]]:
+    fallback = _detected_blocks(validation)
+    if form.get("analysis_mode", "single_target") != "block_heatmap":
+        return fallback
+
+    seq_xlsx = Path(form.get("seq_xlsx", "")).expanduser()
+    if not seq_xlsx.exists():
+        return fallback
+
+    try:
+        overrides = _parse_block_overrides(form)
+        default_desired_products = parse_desired_products(form.get("desired_products", ""))
+        default_scaffold_sequence = parse_scaffold_sequence(form.get("scaffold_sequence", ""))
+        blocks = load_block_specs(
+            seq_xlsx,
+            overrides,
+            default_desired_products=default_desired_products,
+            default_scaffold_sequence=default_scaffold_sequence,
+        )
+        if not blocks and _editor_family(form) == "prime_editing":
+            blocks = infer_flat_blocks(
+                seq_xlsx,
+                overrides,
+                default_desired_products=default_desired_products,
+                default_scaffold_sequence=default_scaffold_sequence,
+            )
+        if not blocks:
+            return fallback
+
+        include = set(_parse_scope(form.get("sample_scope", "")))
+        exclude = set(_parse_scope(form.get("exclude_scope", "")))
+        filtered_blocks = []
+        for block in blocks:
+            row_items = tuple(
+                (label, sample_id)
+                for label, sample_id in block.row_items
+                if (not include or sample_id in include) and sample_id not in exclude
+            )
+            if row_items:
+                filtered_blocks.append(
+                    {
+                        "block_index": block.block_index,
+                        "block_name": block.block_name,
+                        "display_name": block.display_name,
+                        "sample_spec": block.sample_spec,
+                        "target_window": block.target_window,
+                        "desired_products": list(block.desired_products),
+                        "scaffold_sequence": block.scaffold_sequence,
+                        "row_items": [{"label": label, "sample_id": sample_id} for label, sample_id in row_items],
+                    }
+                )
+        return filtered_blocks or fallback
+    except Exception:
+        return fallback
 
 
 def _validation_to_text(validation: ValidationResult | dict[str, object]) -> str:
@@ -325,8 +415,9 @@ def _validation_to_text(validation: ValidationResult | dict[str, object]) -> str
         lines.extend(["", "[감지된 블록]"])
         for block in blocks:
             desired = ", ".join(block["desired_products"]) if block["desired_products"] else "없음"
+            scaffold = str(block.get("scaffold_sequence", "")).strip() or "없음"
             lines.append(
-                f"- {block['display_name']}: samples={block['sample_spec']}, target={block['target_window']}, desired={desired}"
+                f"- {block['display_name']}: samples={block['sample_spec']}, target={block['target_window']}, desired={desired}, scaffold={scaffold}"
             )
     if errors:
         lines.extend(["", "[오류]"])
@@ -337,8 +428,8 @@ def _validation_to_text(validation: ValidationResult | dict[str, object]) -> str
     return "\n".join(lines)
 
 
-def _picker_rows() -> list[dict[str, str]]:
-    return [
+def _picker_rows(form: dict[str, str]) -> list[dict[str, str]]:
+    rows = [
         {
             "name": "fastq_dir",
             "label": "FASTQ 폴더",
@@ -349,19 +440,7 @@ def _picker_rows() -> list[dict[str, str]]:
             "name": "seq_xlsx",
             "label": "Sequence xlsx",
             "button": "파일 선택",
-            "hint": "기본 분석은 단순 sample/sequence/target 형식도 가능하고 `68(wild type)` 같은 표기도 읽습니다. heatmap 분석은 block 구조 xlsx가 필요합니다. block은 1개만 있어도 됩니다.",
-        },
-        {
-            "name": "sample_tale_xlsx",
-            "label": "Sample TALE xlsx (선택 사항)",
-            "button": "파일 선택",
-            "hint": "sample ID와 Left/Right module 매핑이 들어 있는 xlsx 파일입니다. 없으면 tail mapping 결과가 생략됩니다.",
-        },
-        {
-            "name": "tale_array_xlsx",
-            "label": "TALE array xlsx (선택 사항)",
-            "button": "파일 선택",
-            "hint": "Left/Right tail sequence를 채우고 싶을 때 사용하는 xlsx 파일입니다.",
+            "hint": "기본 분석은 단순 sample/sequence/target 형식도 가능하고 `68(wild type)` 같은 표기도 읽습니다. heatmap 분석은 block 구조 xlsx를 기본으로 쓰고, Prime Editing은 flat xlsx 1개도 자동으로 1개 block으로 인식할 수 있습니다.",
         },
         {
             "name": "output_base_dir",
@@ -370,6 +449,22 @@ def _picker_rows() -> list[dict[str, str]]:
             "hint": "분석 결과 폴더 `maund_<날짜>_<시간>` 이 생성될 상위 폴더를 선택하세요.",
         },
     ]
+    if _editor_family(form) != "prime_editing":
+        rows[2:2] = [
+            {
+                "name": "sample_tale_xlsx",
+                "label": "Sample TALE xlsx (선택 사항)",
+                "button": "파일 선택",
+                "hint": "sample ID와 Left/Right module 매핑이 들어 있는 xlsx 파일입니다. 없으면 tail mapping 결과가 생략됩니다.",
+            },
+            {
+                "name": "tale_array_xlsx",
+                "label": "TALE array xlsx (선택 사항)",
+                "button": "파일 선택",
+                "hint": "Left/Right tail sequence를 채우고 싶을 때 사용하는 xlsx 파일입니다.",
+            },
+        ]
+    return rows
 
 
 def _esc(text: object) -> str:
@@ -408,12 +503,13 @@ def _render_block_override_section(
 ) -> str:
     if form.get("analysis_mode", "single_target") != "block_heatmap":
         return ""
-    blocks = _detected_blocks(validation)
+    blocks = _preview_blocks(form, validation)
+    is_prime = _editor_family(form) == "prime_editing"
     if not blocks:
         return """
         <div class="card">
           <h2>블록 미리보기</h2>
-          <div class="hint">`입력 확인`을 누르면 xlsx에서 감지된 block과 block별 이름/desired product 입력칸이 여기에 표시됩니다. block은 1개여도 됩니다.</div>
+          <div class="hint">`입력 확인`을 누르면 xlsx에서 감지된 block과 block별 이름/desired product 입력칸이 여기에 표시됩니다. Prime Editing은 flat xlsx여도 inferred block 1개로 표시될 수 있습니다.</div>
         </div>
         """
 
@@ -422,7 +518,18 @@ def _render_block_override_section(
         index = int(block["block_index"])
         block_name_key = f"{BLOCK_NAME_PREFIX}{index}"
         desired_key = f"{DESIRED_PRODUCTS_PREFIX}{index}"
+        scaffold_key = f"{SCAFFOLD_SEQUENCE_PREFIX}{index}"
         desired_default = ", ".join(block["desired_products"])
+        scaffold_default = str(block.get("scaffold_sequence", ""))
+        scaffold_row = ""
+        if is_prime:
+            scaffold_row = f"""
+              <div class="row">
+                <label for="{_esc(scaffold_key)}">Scaffold sequence (optional)</label>
+                <input type="text" id="{_esc(scaffold_key)}" name="{_esc(scaffold_key)}" value="{_esc(form.get(scaffold_key, scaffold_default))}" />
+                <div class="hint">scaffold-derived byproduct를 따로 분류하고 싶을 때만 입력하세요. 비우면 scaffold 분류를 사용하지 않습니다.</div>
+              </div>
+            """
         rows.append(
             f"""
             <div class="block-box">
@@ -442,13 +549,17 @@ def _render_block_override_section(
                 <textarea id="{_esc(desired_key)}" name="{_esc(desired_key)}" rows="3">{_esc(form.get(desired_key, desired_default))}</textarea>
                 <div class="hint">여러 개면 쉼표 또는 줄바꿈으로 구분하세요. 비우면 xlsx 값 또는 기본값을 사용합니다.</div>
               </div>
+              {scaffold_row}
             </div>
             """
         )
+    block_hint = "heatmap 분석에서는 아래 block별 이름과 desired product를 필요할 때만 수정하면 됩니다."
+    if is_prime:
+        block_hint = "Prime Editing heatmap 분석에서는 block별 desired product와 optional scaffold를 여기서 보완할 수 있습니다."
     return f"""
     <div class="card">
       <h2>블록 미리보기와 보완 입력</h2>
-      <div class="hint">heatmap 분석에서는 아래 block별 이름과 desired product를 필요할 때만 수정하면 됩니다.</div>
+      <div class="hint">{_esc(block_hint)}</div>
       {''.join(rows)}
     </div>
     """
@@ -482,13 +593,15 @@ def _render_result_actions(result: dict[str, object]) -> str:
 
 def _render_page() -> str:
     form = _form()
+    analysis_family = _editor_family(form)
+    is_prime = analysis_family == "prime_editing"
     messages = STATE.get("messages", [])
     validation = STATE.get("validation")
     result = STATE.get("result")
     logs = STATE.get("logs", [])
 
     picker_rows_html = []
-    for field in _picker_rows():
+    for field in _picker_rows(form):
         picker_rows_html.append(
             f"""
             <div class="row">
@@ -573,7 +686,7 @@ def _render_page() -> str:
           <div class="row">
             <label>Target sequence</label>
             <input type="text" value="" disabled />
-            <div class="hint">heatmap 분석에서는 target sequence를 직접 입력하지 않습니다. seq xlsx 안의 block target을 사용합니다.</div>
+            <div class="hint">heatmap 분석에서는 target sequence를 직접 입력하지 않습니다. seq xlsx 안의 block target 또는 Prime flat xlsx에서 inferred target을 사용합니다.</div>
           </div>
         """
 
@@ -590,6 +703,30 @@ def _render_page() -> str:
         """
 
     block_override_section = _render_block_override_section(form, validation)
+    prime_input_block = ""
+    if is_prime:
+        desired_hint = (
+            "원하는 edited sequence를 그대로 넣으세요. 여러 개면 쉼표 또는 줄바꿈으로 구분합니다. 예: ACATTTCGTCCTAGCTGCTTGGCCTGT. v1에서는 target과 길이가 같은 substitution형만 지원합니다."
+        )
+        if form.get("analysis_mode", "single_target") == "block_heatmap":
+            desired_hint = (
+                "Prime heatmap 분석에서 flat xlsx를 쓰는 경우, 여기 입력한 desired product를 inferred block의 기본값으로 사용합니다. block이 여러 개면 아래 block 보완 입력에서 각각 덮어쓸 수 있습니다."
+            )
+        prime_input_block = f"""
+          <div class="row">
+            <label for="desired_products">Desired edited sequence</label>
+            <textarea id="desired_products" name="desired_products" rows="3">{_esc(form.get("desired_products", ""))}</textarea>
+            <div class="hint">{_esc(desired_hint)}</div>
+          </div>
+          <div class="row">
+            <label for="scaffold_sequence">Scaffold sequence (optional)</label>
+            <input type="text" id="scaffold_sequence" name="scaffold_sequence" value="{_esc(form.get("scaffold_sequence", ""))}" />
+            <div class="hint">scaffold-derived byproduct를 따로 분류하고 싶을 때만 입력하세요. 공백은 자동으로 제거합니다.</div>
+          </div>
+        """
+    editor_hint = "TALED는 A>G, T>C, DdCBE는 C>T, G>A 규칙을 사용합니다."
+    if is_prime:
+        editor_hint = "Prime Editing은 desired edited sequence를 기준으로 exact intended / intended+extra / other substitution / optional scaffold-derived / indel only 를 분리합니다."
 
     return f"""<!doctype html>
 <html lang="ko">
@@ -786,8 +923,9 @@ def _render_page() -> str:
             <select id="editor_type" name="editor_type">
               {''.join(preset_options)}
             </select>
-            <div class="hint">TALED는 <span class="mono">A&gt;G, T&gt;C</span>, DdCBE는 <span class="mono">C&gt;T, G&gt;A</span> 규칙을 사용합니다.</div>
+            <div class="hint">{_esc(editor_hint)}</div>
           </div>
+          {prime_input_block}
           <div class="actions">
             <button type="submit" name="action" value="validate">입력 확인</button>
             <button type="submit" name="action" value="run" class="secondary">분석 실행</button>

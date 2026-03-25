@@ -85,7 +85,8 @@ class RegressionTest(unittest.TestCase):
                 self.skipTest(f"Missing input: {path}")
 
     def test_regression_260308_style(self) -> None:
-        fastq_dir = DOWNLOADS
+        preferred_fastq_dir = DOWNLOADS / "조상원 (1)"
+        fastq_dir = preferred_fastq_dir if preferred_fastq_dir.exists() else DOWNLOADS
         seq_xlsx = DOWNLOADS / "seq정보 to 동현.xlsx"
         sample_tale_xlsx = DOWNLOADS / "sample id+ TALE.xlsx"
         tale_array_xlsx = DOWNLOADS / "TALE-array-Golden Gate assembly (조박사님) arabidopsis.xlsx"

@@ -6,7 +6,7 @@
 
 ## 1. 이 프로그램이 하는 일
 
-이 프로그램은 두 가지 방식으로 MAUND 분석 결과를 만들어 줍니다.
+이 프로그램은 두 가지 방식으로 MAUND 분석 결과를 만들어 주고, editor type으로는 `TALED`, `DdCBE`, `Prime Editing` 을 지원합니다.
 
 ### 방식 1. 기본 분석
 
@@ -20,6 +20,8 @@
 - sample 번호 범위
 - target sequence
 - editor type
+- Prime Editing일 때는 desired edited sequence
+- Prime Editing일 때는 optional scaffold sequence
 
 ### 방식 2. heatmap 분석
 
@@ -33,6 +35,8 @@ block은 여러 개여도 되고, `N234` 하나만 있어도 됩니다.
 - TALE array xlsx 파일
 - sample 번호 범위 또는 제외 번호
 - editor type
+- Prime Editing일 때는 desired edited sequence 기본값
+- Prime Editing일 때는 optional scaffold sequence 기본값
 - block 이름과 desired product sequence 보완값(필요할 때만)
 
 실행이 끝나면 내 컴퓨터 안에 결과 폴더가 생깁니다.  
@@ -77,6 +81,15 @@ heatmap 분석일 때는 block마다 아래 파일도 각각 따로 생깁니다
 - `heatmap_matrix_f260_<tag>.tsv`
 - `heatmap_detail_f260_<tag>.tsv`
 - `report_f260_<tag>.html`
+
+Prime Editing 기본 분석일 때는 아래 파일이 추가로 생깁니다.
+
+- `sample_editing_prime_<targetslug>_<tag>.tsv`
+- `prime_allele_classes_prime_<targetslug>_<tag>.tsv`
+- `prime_scaffold_matches_prime_<targetslug>_<tag>.tsv` (scaffold 입력 시)
+- `heatmap_matrix_prime_<targetslug>_<tag>.tsv`
+- `heatmap_detail_prime_<targetslug>_<tag>.tsv`
+- `prime_report_prime_<targetslug>_<tag>.html`
 
 ## 2. GitHub에서 다운로드하는 방법
 
@@ -182,6 +195,42 @@ sample ID 칸에 짧은 설명이 붙어 있어도 기본 분석에서는 읽을
 이 경우 모두 sample `68` 로 해석됩니다.
 
 오늘처럼 `seq정보_260315.xlsx` 처럼 sample `68` 하나만 들어 있는 flat xlsx는 heatmap용이 아니라 `기본 분석용`으로 사용하면 됩니다.
+
+### Prime Editing용 sequence xlsx 형식
+
+Prime Editing은 두 가지 방식으로 사용할 수 있습니다.
+
+- `기본 분석`: flat xlsx 사용 가능
+- `heatmap 분석`: block xlsx도 가능하고, 첨부 예시처럼 flat xlsx 1개도 inferred block 1개로 자동 처리 가능
+
+Prime Editing flat xlsx에서는 최소한 아래 정보가 필요합니다.
+
+- sample 범위
+- 공통 amplicon sequence
+- 공통 target window
+- sample label
+- sample ID
+
+예를 들면 아래와 비슷한 구조입니다.
+
+```text
+sample ID NO. | sequence | target window
+94~96         | ...      | ACATTTCTTCCTAGCTGCTTGGCCTGT
+
+row label | sample ID
+control2  | 94
+ELVd2     | 95
+ELVd3     | 96
+```
+
+Prime Editing에서는 xlsx 안에 desired edited sequence를 꼭 넣을 필요는 없습니다.  
+대신 앱 화면에서 `Desired edited sequence` 를 직접 입력합니다.
+
+중요:
+
+- v1에서는 target과 길이가 같은 `substitution형 prime editing`만 지원합니다.
+- insertion, deletion, twinPE, large replacement는 아직 지원하지 않습니다.
+- scaffold-derived byproduct를 따로 보고 싶으면 앱 화면의 `Scaffold sequence (optional)` 칸을 입력합니다.
 
 ### heatmap 분석용 sequence xlsx 형식
 
@@ -434,8 +483,35 @@ AAATGAATCTGCTAATGAA
 
 - `TALED`
 - `DdCBE`
+- `Prime Editing`
 
-각 editor type에 따라 허용 변이 규칙이 달라집니다.
+각 editor type에 따라 분석 규칙이 달라집니다.
+
+- `TALED`: A>G, T>C
+- `DdCBE`: C>T, G>A
+- `Prime Editing`: desired edited sequence를 기준으로 exact intended / intended+extra / other substitution / optional scaffold-derived / indel only 분류
+
+#### 5) Desired edited sequence
+
+이 칸은 `Editor type` 을 `Prime Editing` 으로 바꿨을 때 사용합니다.
+
+- 원하는 edited sequence를 그대로 붙여넣습니다.
+- 여러 개를 비교하고 싶으면 쉼표 또는 줄바꿈으로 여러 개 넣을 수 있습니다.
+- target과 길이가 같아야 합니다.
+
+예시:
+
+```text
+ACATTTCGTCCTAGCTGCTTGGCCTGT
+```
+
+#### 6) Scaffold sequence (optional)
+
+이 칸도 `Prime Editing` 일 때만 사용합니다.
+
+- scaffold-derived byproduct를 따로 분류하고 싶을 때만 입력합니다.
+- 모르면 비워 두어도 됩니다.
+- 최소 8 nt 이상 DNA 문자만 넣습니다.
 
 ## 8. 입력이 맞는지 먼저 확인하는 방법
 

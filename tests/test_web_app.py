@@ -5,6 +5,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
+from maund_local_app.models import BlockSpec
 from maund_local_app.web_app import (
     FIELD_DEFAULTS,
     STATE,
@@ -88,6 +89,30 @@ class PickerHelpersTest(unittest.TestCase):
             ("AAATGAATCTGCTGATGAA", "AAATGAATCTGCTAGTGAA"),
         )
 
+    def test_build_config_from_form_supports_prime_inputs(self) -> None:
+        config = _build_config_from_form(
+            {
+                "fastq_dir": "/tmp/fastq",
+                "seq_xlsx": "/tmp/prime.xlsx",
+                "sample_tale_xlsx": "/tmp/sample_tale.xlsx",
+                "tale_array_xlsx": "/tmp/tale_array.xlsx",
+                "output_base_dir": "/tmp/out",
+                "sample_scope": "94-96",
+                "exclude_scope": "",
+                "target_seq": "ACATTTCTTCCTAGCTGCTTGGCCTGT",
+                "editor_type": "prime",
+                "analysis_mode": "single_target",
+                "heatmap_scale_max": "5",
+                "desired_products": "ACATTTCGTCCTAGCTGCTTGGCCTGT",
+                "scaffold_sequence": "GGGGGGGG",
+            }
+        )
+        self.assertEqual(config.editor_type, "prime")
+        self.assertEqual(config.desired_products, ("ACATTTCGTCCTAGCTGCTTGGCCTGT",))
+        self.assertEqual(config.scaffold_sequence, "GGGGGGGG")
+        self.assertIsNone(config.sample_tale_xlsx)
+        self.assertIsNone(config.tale_array_xlsx)
+
     def test_render_page_shows_heatmap_scale_selector_in_block_mode(self) -> None:
         STATE["form"] = {
             **FIELD_DEFAULTS,
@@ -98,6 +123,82 @@ class PickerHelpersTest(unittest.TestCase):
         self.assertIn("Heatmap 색상 범위", page)
         self.assertIn('<option value="1" selected>', page)
         self.assertIn(">0-1<", page)
+
+    def test_render_page_shows_prime_inputs_and_hides_tale_rows(self) -> None:
+        STATE["form"] = {
+            **FIELD_DEFAULTS,
+            "editor_type": "prime",
+            "desired_products": "ACATTTCGTCCTAGCTGCTTGGCCTGT",
+            "scaffold_sequence": "GGGGGGGG",
+        }
+        page = _render_page()
+        self.assertIn("Desired edited sequence", page)
+        self.assertIn("Scaffold sequence (optional)", page)
+        self.assertNotIn("Sample TALE xlsx (선택 사항)", page)
+        self.assertNotIn("TALE array xlsx (선택 사항)", page)
+
+    def test_render_page_shows_prime_block_scaffold_override(self) -> None:
+        STATE["form"] = {
+            **FIELD_DEFAULTS,
+            "editor_type": "prime",
+            "analysis_mode": "block_heatmap",
+        }
+        STATE["validation"] = {
+            "is_valid": True,
+            "errors": (),
+            "warnings": (),
+            "selected_sample_ids": (94, 95, 96),
+            "available_fastq_ids": (94, 95, 96),
+            "available_sequence_ids": (94, 95, 96),
+            "missing_fastq_ids": (),
+            "missing_sequence_ids": (),
+            "invalid_target_sample_ids": (),
+            "target_mismatch_sample_ids": (),
+            "detected_blocks": [
+                {
+                    "block_index": 1,
+                    "block_name": "prime editing seq",
+                    "sample_spec": "94~96",
+                    "target_window": "ACATTTCTTCCTAGCTGCTTGGCCTGT",
+                    "desired_products": ["ACATTTCGTCCTAGCTGCTTGGCCTGT"],
+                    "scaffold_sequence": "",
+                    "row_items": [("control2", 94), ("ELVd2", 95), ("ELVd3", 96)],
+                }
+            ],
+        }
+        page = _render_page()
+        self.assertIn("Prime Editing heatmap 분석", page)
+        self.assertIn("scaffold_sequence_1", page)
+
+    def test_render_page_previews_prime_block_before_validate(self) -> None:
+        STATE["form"] = {
+            **FIELD_DEFAULTS,
+            "editor_type": "prime",
+            "analysis_mode": "block_heatmap",
+            "seq_xlsx": "/tmp/prime editing seq.xlsx",
+            "desired_products": "ACATTTCGTCCTAGCTGCTTGGCCTGT",
+        }
+        with patch("maund_local_app.web_app.Path.exists", return_value=True), patch(
+            "maund_local_app.web_app.load_block_specs",
+            return_value=(),
+        ), patch(
+            "maund_local_app.web_app.infer_flat_blocks",
+            return_value=(
+                BlockSpec(
+                    block_index=1,
+                    block_name="block_1",
+                    sample_spec="94~96",
+                    full_sequence="ACATTTCTTCCTAGCTGCTTGGCCTGT",
+                    target_window="ACATTTCTTCCTAGCTGCTTGGCCTGT",
+                    row_items=(("control2", 94), ("ELVd2", 95), ("ELVd3", 96)),
+                    desired_products=("ACATTTCGTCCTAGCTGCTTGGCCTGT",),
+                ),
+            ),
+        ):
+            page = _render_page()
+        self.assertIn("block_1", page)
+        self.assertIn("control2=94", page)
+        self.assertIn("ACATTTCGTCCTAGCTGCTTGGCCTGT", page)
 
     def test_validation_to_text_lists_detected_blocks(self) -> None:
         validation = {
@@ -118,6 +219,7 @@ class PickerHelpersTest(unittest.TestCase):
                     "sample_spec": "49~67",
                     "target_window": "AAATGAATCTGCTAATGAA",
                     "desired_products": ["AAATGAATCTGCTGATGAA"],
+                    "scaffold_sequence": "",
                     "row_items": [("R1L2", 49), ("Col0(WT)", 67)],
                 }
             ],
@@ -127,6 +229,7 @@ class PickerHelpersTest(unittest.TestCase):
         self.assertIn("[경고]", text)
         self.assertIn("[감지된 블록]", text)
         self.assertIn("N234", text)
+        self.assertIn("scaffold=없음", text)
 
     def test_handle_action_reports_validation_exception_in_messages(self) -> None:
         with patch("maund_local_app.web_app.validate_config", side_effect=RuntimeError("boom")):

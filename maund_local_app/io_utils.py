@@ -177,6 +177,10 @@ def parse_desired_products(text: str) -> tuple[str, ...]:
     return tuple(deduped)
 
 
+def parse_scaffold_sequence(text: str) -> str:
+    return _normalize_dna_sequence(text)
+
+
 def slugify_name(text: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", text.strip().lower())
     slug = slug.strip("_")
@@ -221,6 +225,8 @@ def _block_hint(sample_spec: str, target_window: str) -> tuple[str, tuple[str, .
 def apply_block_overrides(
     blocks: tuple[BlockSpec, ...],
     overrides: tuple[BlockOverride, ...] = (),
+    default_desired_products: tuple[str, ...] = (),
+    default_scaffold_sequence: str = "",
 ) -> tuple[BlockSpec, ...]:
     override_by_index = {item.block_index: item for item in overrides}
     resolved: list[BlockSpec] = []
@@ -228,12 +234,15 @@ def apply_block_overrides(
         hint_name, hint_products = _block_hint(block.sample_spec, block.target_window)
         override = override_by_index.get(block.block_index)
         block_name = block.block_name or hint_name or f"block_{block.block_index}"
-        desired_products = block.desired_products or hint_products
+        desired_products = block.desired_products or hint_products or default_desired_products
+        scaffold_sequence = block.scaffold_sequence or default_scaffold_sequence
         if override:
             if override.block_name.strip():
                 block_name = override.block_name.strip()
             if override.desired_products:
                 desired_products = tuple(seq.upper() for seq in override.desired_products)
+            if override.scaffold_sequence.strip():
+                scaffold_sequence = override.scaffold_sequence.strip().upper()
         resolved.append(
             BlockSpec(
                 block_index=block.block_index,
@@ -243,6 +252,7 @@ def apply_block_overrides(
                 target_window=block.target_window,
                 row_items=block.row_items,
                 desired_products=desired_products,
+                scaffold_sequence=scaffold_sequence,
             )
         )
     return tuple(resolved)
@@ -251,6 +261,8 @@ def apply_block_overrides(
 def load_block_specs(
     seq_xlsx: Path,
     overrides: tuple[BlockOverride, ...] = (),
+    default_desired_products: tuple[str, ...] = (),
+    default_scaffold_sequence: str = "",
 ) -> tuple[BlockSpec, ...]:
     rows = parse_xlsx_rows(seq_xlsx, "Sheet1")
     blocks: list[BlockSpec] = []
@@ -297,10 +309,72 @@ def load_block_specs(
                     target_window=target_window,
                     row_items=tuple(row_items),
                     desired_products=desired_products,
+                    scaffold_sequence="",
                 )
             )
 
-    return apply_block_overrides(tuple(blocks), overrides)
+    return apply_block_overrides(
+        tuple(blocks),
+        overrides,
+        default_desired_products=default_desired_products,
+        default_scaffold_sequence=default_scaffold_sequence,
+    )
+
+
+def infer_flat_blocks(
+    seq_xlsx: Path,
+    overrides: tuple[BlockOverride, ...] = (),
+    default_desired_products: tuple[str, ...] = (),
+    default_scaffold_sequence: str = "",
+) -> tuple[BlockSpec, ...]:
+    rows = parse_xlsx_rows(seq_xlsx, "Sheet1")
+    spec_rows: list[tuple[int, list[str]]] = []
+    for idx, row in enumerate(rows):
+        sample_spec = row[1].strip() if len(row) > 1 else ""
+        sequence = _normalize_dna_sequence(row[2]) if len(row) > 2 else ""
+        target_window = _normalize_dna_sequence(row[3]) if len(row) > 3 else ""
+        if not sample_spec or not re.search(r"\d", sample_spec):
+            continue
+        if not is_dna_text(sequence) or not is_dna_text(target_window):
+            continue
+        spec_rows.append((idx, row))
+
+    blocks: list[BlockSpec] = []
+    for block_index, (row_idx, row) in enumerate(spec_rows, start=1):
+        next_row_idx = spec_rows[block_index][0] if block_index < len(spec_rows) else len(rows)
+        sample_ids = tuple(parse_id_spec(row[1].replace(" ", "")))
+        label_by_sample: dict[int, str] = {}
+        for scan_idx in range(row_idx + 1, next_row_idx):
+            scan_row = rows[scan_idx]
+            if len(scan_row) < 3:
+                continue
+            label = scan_row[1].strip()
+            sample_text = scan_row[2].strip()
+            if label and sample_text.isdigit():
+                sample_id = int(sample_text)
+                if sample_id in sample_ids:
+                    label_by_sample[sample_id] = label
+
+        row_items = tuple((label_by_sample.get(sample_id, f"sample {sample_id}"), sample_id) for sample_id in sample_ids)
+        blocks.append(
+            BlockSpec(
+                block_index=block_index,
+                block_name=_first_nonempty(row[0] if row else "", seq_xlsx.stem),
+                sample_spec=row[1].strip(),
+                full_sequence=_normalize_dna_sequence(row[2]) if len(row) > 2 else "",
+                target_window=_normalize_dna_sequence(row[3]) if len(row) > 3 else "",
+                row_items=row_items,
+                desired_products=default_desired_products,
+                scaffold_sequence=default_scaffold_sequence,
+            )
+        )
+
+    return apply_block_overrides(
+        tuple(blocks),
+        overrides,
+        default_desired_products=default_desired_products,
+        default_scaffold_sequence=default_scaffold_sequence,
+    )
 
 
 def load_seq_mappings(seq_xlsx: Path) -> dict[int, dict[str, str]]:

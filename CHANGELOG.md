@@ -2,6 +2,16 @@
 
 이 문서는 GitHub 버전 배포용 변경 이력을 기록합니다.
 
+## [0.1.6] - 2026-03-25
+
+- `Prime Editing` editor type 추가
+- Prime Editing 기본 분석과 heatmap 분석에서 desired edited sequence / optional scaffold sequence 입력 지원
+- flat prime editing xlsx를 inferred block 1개로 읽어 heatmap 분석과 block별 HTML 리포트 생성 지원
+- prime outcome을 `exact intended / intended+extra / other substitution / optional scaffold-derived / indel only`로 분류하도록 엔진 확장
+- Prime Editing HTML 리포트와 position heatmap, prime 전용 TSV 출력 추가
+- Prime heatmap에서 `입력 확인` 전에도 현재 입력값 기준 block 미리보기와 desired/scaffold 값이 보이도록 UI 개선
+- README에 Prime Editing 입력 형식과 desired product sequence 사용법 추가
+
 ## [0.1.5] - 2026-03-18
 
 - heatmap HTML 오른쪽에 논문 스타일의 `Color Range` 범례 추가

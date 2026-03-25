@@ -920,6 +920,7 @@ def build_analysis_flow_markdown(
     warnings: list[str],
     block_summaries: list[str] | None = None,
 ) -> str:
+    is_prime = preset.analysis_family == "prime_editing"
     lines = [
         f"# Analysis Flow ({config.date_tag})",
         "",
@@ -928,35 +929,63 @@ def build_analysis_flow_markdown(
         "- Samples: " + ",".join(str(sample_id) for sample_id in selected_sample_ids),
     ]
     if config.analysis_mode == "single_target":
-        lines.extend(
-            [
-                f"- Target: {config.target_seq.upper()}",
-                f"- Editor: {preset.label}",
-                f"- Rule: {preset.allowed_rule_text}",
-                "",
-                "## Steps",
-                "1. Discover FASTQ pairs and merge with fixed offset (29)",
-                "2. Run MAUND-compatible lite extraction per sample and keep same-length outputs",
-                "3. Count allowed-only OR-edited haplotypes per sample",
-                "4. Build ranked per-sample haplotype tables and HTML cards",
-                "5. Write run notes and reusable table outputs",
-            ]
-        )
+        lines.extend([f"- Target: {config.target_seq.upper()}", f"- Editor: {preset.label}"])
+        if is_prime:
+            lines.extend(
+                [
+                    f"- Desired product(s): {', '.join(config.desired_products) or 'not provided'}",
+                    f"- Scaffold sequence: {config.scaffold_sequence or 'not provided'}",
+                    "",
+                    "## Steps",
+                    "1. Discover FASTQ pairs and merge with fixed offset (29)",
+                    "2. Run MAUND-compatible lite extraction per sample and keep both same-length and all-read outputs",
+                    "3. Classify each read into WT, exact intended, intended+extra, other substitution, optional scaffold-derived, or indel-only",
+                    "4. Build prime-editing summary tables, representative allele tables, and position heatmap",
+                    "5. Write prime HTML report and reusable table outputs",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    f"- Rule: {preset.allowed_rule_text}",
+                    "",
+                    "## Steps",
+                    "1. Discover FASTQ pairs and merge with fixed offset (29)",
+                    "2. Run MAUND-compatible lite extraction per sample and keep same-length outputs",
+                    "3. Count allowed-only OR-edited haplotypes per sample",
+                    "4. Build ranked per-sample haplotype tables and HTML cards",
+                    "5. Write run notes and reusable table outputs",
+                ]
+            )
     else:
-        lines.extend(
-            [
-                f"- Editor: {preset.label}",
-                f"- Rule: {preset.allowed_rule_text}",
-                f"- Heatmap color scale: {_format_heatmap_scale(config.heatmap_color_max_pct)}",
-                "",
-                "## Steps",
-                "1. Parse block definitions from seq xlsx and merge all needed FASTQ pairs",
-                "2. Run MAUND-compatible lite extraction separately for each block target",
-                "3. Write block-specific MAUND tables and combined HTML reports",
-                "4. Compute position-wise intended conversion heatmaps for each block",
-                "5. Save per-block HTML, TSV outputs, and run notes",
-            ]
-        )
+        lines.extend([f"- Editor: {preset.label}", f"- Heatmap color scale: {_format_heatmap_scale(config.heatmap_color_max_pct)}"])
+        if is_prime:
+            lines.extend(
+                [
+                    f"- Global desired product default(s): {', '.join(config.desired_products) or 'not provided'}",
+                    f"- Global scaffold default: {config.scaffold_sequence or 'not provided'}",
+                    "",
+                    "## Steps",
+                    "1. Parse block definitions from seq xlsx, or infer a single block from flat prime-editing xlsx",
+                    "2. Merge all needed FASTQ pairs and run MAUND-compatible lite extraction for each block",
+                    "3. Classify reads into prime-editing outcome classes for each block target",
+                    "4. Compute position-wise intended incorporation heatmaps for each block",
+                    "5. Save per-block prime HTML, TSV outputs, and run notes",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    f"- Rule: {preset.allowed_rule_text}",
+                    "",
+                    "## Steps",
+                    "1. Parse block definitions from seq xlsx and merge all needed FASTQ pairs",
+                    "2. Run MAUND-compatible lite extraction separately for each block target",
+                    "3. Write block-specific MAUND tables and combined HTML reports",
+                    "4. Compute position-wise intended conversion heatmaps for each block",
+                    "5. Save per-block HTML, TSV outputs, and run notes",
+                ]
+            )
         if block_summaries:
             lines.extend(["", "## Blocks"])
             for summary in block_summaries:

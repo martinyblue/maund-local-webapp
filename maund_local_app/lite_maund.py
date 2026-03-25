@@ -195,6 +195,14 @@ def run_single_sample_lite(
         "window_exists": window_file.exists(),
         "same_length_file": str(same_length_file),
         "same_length_exists": same_length_file.exists(),
+        "all_file": str(all_file),
+        "all_exists": all_file.exists(),
+        "mut_file": str(mut_file),
+        "wt_subst_file": str(wt_subst_file),
+        "all_read_count": n_all,
+        "same_length_read_count": sum(same_len_counter.values()),
+        "comparison_length": length_range,
+        "target_index_in_fragment": i_rgen,
         "log_file": str(log_file),
     }
 

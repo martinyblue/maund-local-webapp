@@ -13,6 +13,7 @@ def default_date_tag() -> str:
 class EditorPreset:
     key: str
     label: str
+    analysis_family: str
     allowed_substitutions: frozenset[tuple[str, str]]
     allowed_rule_text: str
     primary_metric_label: str
@@ -23,6 +24,7 @@ class BlockOverride:
     block_index: int
     block_name: str = ""
     desired_products: tuple[str, ...] = ()
+    scaffold_sequence: str = ""
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,7 @@ class BlockSpec:
     row_items: tuple[tuple[str, int], ...]
     block_name: str = ""
     desired_products: tuple[str, ...] = ()
+    scaffold_sequence: str = ""
 
     @property
     def sample_ids(self) -> tuple[int, ...]:
@@ -54,6 +57,8 @@ class AnalysisConfig:
     exclude_samples: tuple[int, ...] = ()
     target_seq: str = ""
     editor_type: str = "taled"
+    desired_products: tuple[str, ...] = ()
+    scaffold_sequence: str = ""
     analysis_mode: str = "single_target"
     heatmap_color_max_pct: float = 5.0
     block_overrides: tuple[BlockOverride, ...] = ()

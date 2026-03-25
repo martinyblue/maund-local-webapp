@@ -15,6 +15,7 @@ from maund_workflow.run_pipeline import (
 )
 
 from .io_utils import (
+    infer_flat_blocks,
     load_block_specs,
     load_sample_tail_mapping,
     load_seq_mappings,
@@ -26,6 +27,14 @@ from .io_utils import (
 from .lite_maund import run_maund_lite
 from .models import AnalysisConfig, BlockSpec, RunResult, ValidationResult
 from .presets import get_editor_preset
+from .prime_editing import (
+    build_prime_heatmap_tables,
+    build_prime_sample_reports,
+    render_prime_block_report_html,
+    render_prime_html,
+    validate_prime_desired_products,
+    validate_prime_scaffold_sequence,
+)
 from .reporting import (
     build_analysis_flow_markdown,
     build_heatmap_tables,
@@ -38,6 +47,30 @@ from .reporting import (
 DEFAULT_CONDITION = "one_condition"
 DEFAULT_OFFSET = 29
 DEFAULT_ANALYSIS_MODE = "single_target"
+RUN_STATUS_FIELDS = [
+    "sample_id",
+    "replicate",
+    "condition",
+    "s_index",
+    "aseq",
+    "rgen",
+    "return_code",
+    "summary_file",
+    "summary_exists",
+    "window_file",
+    "window_exists",
+    "same_length_file",
+    "same_length_exists",
+    "all_file",
+    "all_exists",
+    "mut_file",
+    "wt_subst_file",
+    "all_read_count",
+    "same_length_read_count",
+    "comparison_length",
+    "target_index_in_fragment",
+    "log_file",
+]
 LogFunc = Callable[[str], None]
 
 
@@ -55,6 +88,8 @@ def _normalized_config(config: AnalysisConfig) -> AnalysisConfig:
         tale_array_xlsx=Path(config.tale_array_xlsx).expanduser() if config.tale_array_xlsx else None,
         target_seq=config.target_seq.strip().upper(),
         editor_type=config.editor_type.strip().lower() or "taled",
+        desired_products=tuple(seq.strip().upper() for seq in config.desired_products if seq.strip()),
+        scaffold_sequence=config.scaffold_sequence.strip().upper(),
         analysis_mode=config.analysis_mode.strip().lower() or DEFAULT_ANALYSIS_MODE,
         heatmap_color_max_pct=float(config.heatmap_color_max_pct or 5.0),
         output_base_dir=Path(config.output_base_dir).expanduser(),
@@ -154,6 +189,50 @@ def _load_tail_mapping_bundle(
     return all_rows, scope_rows, by_sample, warnings
 
 
+def _prime_input_errors(target_seq: str, desired_products: tuple[str, ...], scaffold_sequence: str) -> list[str]:
+    errors: list[str] = []
+    if not target_seq:
+        errors.append("Target sequence is required.")
+        return errors
+    try:
+        validate_prime_desired_products(target_seq, desired_products)
+    except ValueError as exc:
+        errors.append(str(exc))
+    try:
+        validate_prime_scaffold_sequence(scaffold_sequence)
+    except ValueError as exc:
+        errors.append(str(exc))
+    return errors
+
+
+def _resolved_blocks(cfg: AnalysisConfig, preset_analysis_family: str) -> tuple[BlockSpec, ...]:
+    blocks = load_block_specs(
+        cfg.seq_xlsx,
+        cfg.block_overrides,
+        default_desired_products=cfg.desired_products,
+        default_scaffold_sequence=cfg.scaffold_sequence,
+    )
+    if blocks:
+        return tuple(
+            filtered
+            for block in blocks
+            if (filtered := _filter_block(block, cfg.sample_ids, cfg.exclude_samples)).row_items
+        )
+    if preset_analysis_family != "prime_editing":
+        return ()
+    inferred = infer_flat_blocks(
+        cfg.seq_xlsx,
+        cfg.block_overrides,
+        default_desired_products=cfg.desired_products,
+        default_scaffold_sequence=cfg.scaffold_sequence,
+    )
+    return tuple(
+        filtered
+        for block in inferred
+        if (filtered := _filter_block(block, cfg.sample_ids, cfg.exclude_samples)).row_items
+    )
+
+
 def _single_target_validation(cfg: AnalysisConfig) -> ValidationResult:
     errors: list[str] = []
     warnings: list[str] = []
@@ -178,6 +257,8 @@ def _single_target_validation(cfg: AnalysisConfig) -> ValidationResult:
         errors.append(f"Invalid date_tag: {cfg.date_tag}")
     if not math.isfinite(cfg.heatmap_color_max_pct) or cfg.heatmap_color_max_pct <= 0:
         errors.append(f"Heatmap color scale max must be a positive number: {cfg.heatmap_color_max_pct}")
+    if preset is not None and preset.analysis_family == "prime_editing":
+        errors.extend(_prime_input_errors(cfg.target_seq, cfg.desired_products, cfg.scaffold_sequence))
 
     if errors:
         return ValidationResult(
@@ -239,10 +320,11 @@ def _single_target_validation(cfg: AnalysisConfig) -> ValidationResult:
             "Target in seq xlsx does not match the requested target for sample IDs: "
             + ",".join(map(str, target_mismatch_sample_ids))
         )
-    if cfg.sample_tale_xlsx is None:
-        warnings.append("sample_tale_xlsx not provided. Tail-module mapping outputs will be skipped unless seq xlsx contains combos.")
-    if cfg.sample_tale_xlsx and cfg.tale_array_xlsx is None:
-        warnings.append("tale_array_xlsx not provided. Tail sequences will be blank in mapping tables.")
+    if preset is not None and preset.analysis_family != "prime_editing":
+        if cfg.sample_tale_xlsx is None:
+            warnings.append("sample_tale_xlsx not provided. Tail-module mapping outputs will be skipped unless seq xlsx contains combos.")
+        if cfg.sample_tale_xlsx and cfg.tale_array_xlsx is None:
+            warnings.append("tale_array_xlsx not provided. Tail sequences will be blank in mapping tables.")
     if preset is not None and not selected_ids:
         warnings.append(f"No samples available for preset {preset.label}.")
 
@@ -266,9 +348,10 @@ def _block_heatmap_validation(cfg: AnalysisConfig) -> ValidationResult:
     warnings: list[str] = []
 
     try:
-        get_editor_preset(cfg.editor_type)
+        preset = get_editor_preset(cfg.editor_type)
     except ValueError as exc:
         errors.append(str(exc))
+        preset = None
 
     if not cfg.fastq_dir.exists():
         errors.append(f"FASTQ directory not found: {cfg.fastq_dir}")
@@ -297,11 +380,13 @@ def _block_heatmap_validation(cfg: AnalysisConfig) -> ValidationResult:
             detected_blocks=(),
         )
 
-    blocks = tuple(
-        filtered
-        for block in load_block_specs(cfg.seq_xlsx, cfg.block_overrides)
-        if (filtered := _filter_block(block, cfg.sample_ids, cfg.exclude_samples)).row_items
-    )
+    if preset is not None and preset.analysis_family == "prime_editing":
+        try:
+            validate_prime_scaffold_sequence(cfg.scaffold_sequence)
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    blocks = _resolved_blocks(cfg, preset.analysis_family if preset is not None else "base_editing")
     if not blocks:
         errors.append("No block was selected from the seq xlsx after applying sample scope and exclusions.")
 
@@ -317,6 +402,15 @@ def _block_heatmap_validation(cfg: AnalysisConfig) -> ValidationResult:
     invalid_target_ids: set[int] = set()
     target_mismatch_ids: set[int] = set()
     for block in blocks:
+        if preset is not None and preset.analysis_family == "prime_editing":
+            try:
+                validate_prime_desired_products(block.target_window, block.desired_products)
+            except ValueError as exc:
+                errors.append(f"{block.display_name}: {exc}")
+            try:
+                validate_prime_scaffold_sequence(block.scaffold_sequence)
+            except ValueError as exc:
+                errors.append(f"{block.display_name}: {exc}")
         for sample_id in block.sample_ids:
             if sample_id not in seq_map:
                 continue
@@ -324,7 +418,7 @@ def _block_heatmap_validation(cfg: AnalysisConfig) -> ValidationResult:
                 invalid_target_ids.add(sample_id)
             if seq_map[sample_id]["target_window"].upper() != block.target_window:
                 target_mismatch_ids.add(sample_id)
-        if not block.desired_products:
+        if preset is not None and preset.analysis_family != "prime_editing" and not block.desired_products:
             warnings.append(f"Desired product sequence was not provided for block {block.display_name}. The title will omit it.")
 
     if missing_fastq_ids:
@@ -341,10 +435,11 @@ def _block_heatmap_validation(cfg: AnalysisConfig) -> ValidationResult:
             "Target in seq xlsx does not match the resolved block target for sample IDs: "
             + ",".join(map(str, sorted(target_mismatch_ids)))
         )
-    if cfg.sample_tale_xlsx is None:
-        warnings.append("sample_tale_xlsx not provided. Tail-module mapping outputs will be skipped unless seq xlsx contains combos.")
-    if cfg.sample_tale_xlsx and cfg.tale_array_xlsx is None:
-        warnings.append("tale_array_xlsx not provided. Tail sequences will be blank in mapping tables.")
+    if preset is not None and preset.analysis_family != "prime_editing":
+        if cfg.sample_tale_xlsx is None:
+            warnings.append("sample_tale_xlsx not provided. Tail-module mapping outputs will be skipped unless seq xlsx contains combos.")
+        if cfg.sample_tale_xlsx and cfg.tale_array_xlsx is None:
+            warnings.append("tale_array_xlsx not provided. Tail sequences will be blank in mapping tables.")
 
     return ValidationResult(
         is_valid=not errors,
@@ -466,22 +561,7 @@ def _run_single_target_analysis(cfg: AnalysisConfig, validation: ValidationResul
     write_tsv(
         run_status_path,
         run_rows,
-        [
-            "sample_id",
-            "replicate",
-            "condition",
-            "s_index",
-            "aseq",
-            "rgen",
-            "return_code",
-            "summary_file",
-            "summary_exists",
-            "window_file",
-            "window_exists",
-            "same_length_file",
-            "same_length_exists",
-            "log_file",
-        ],
+        RUN_STATUS_FIELDS,
     )
     write_tsv(skipped_path, skipped_rows, ["sample_id", "reason"])
     write_tsv(
@@ -507,153 +587,310 @@ def _run_single_target_analysis(cfg: AnalysisConfig, validation: ValidationResul
     build_miseq_summary_table(run_rows, miseq_path)
 
     _log(logger, "Building per-sample editing tables and HTML report")
-    tail_all_rows, tail_scope_rows, tail_by_sample, tail_warnings = _load_tail_mapping_bundle(
-        cfg=cfg,
-        selected_ids=selected_ids,
-    )
-    warnings = list(validation.warnings) + tail_warnings
-    per_sample_rows, ranked_rows, render_rows = build_sample_reports(
-        run_rows=run_rows,
-        preset=preset,
-        tail_by_sample=tail_by_sample,
-    )
-
+    warnings = list(validation.warnings)
     sample_slug = f"{cfg.editor_type.lower()}_{target_slug(cfg.target_seq)}"
-    per_sample_path = dirs["tables"] / f"sample_editing_{sample_slug}_{cfg.date_tag}.tsv"
-    ranked_path = dirs["tables"] / f"ranked_haplotypes_{sample_slug}_{cfg.date_tag}.tsv"
-    render_path = dirs["tables"] / f"haplotype_render_rows_{sample_slug}_{cfg.date_tag}.tsv"
-    html_path = dirs["tables"] / f"haplotype_colored_by_combo_{sample_slug}_{cfg.date_tag}.html"
     analysis_flow_path = dirs["tables"] / f"analysis_flow_{cfg.date_tag}.md"
 
-    write_tsv(
-        per_sample_path,
-        per_sample_rows,
-        [
-            "sample_id",
-            "replicate",
-            "condition",
-            "s_index",
-            "tail_combo",
-            "left_tail_module",
-            "right_tail_module",
-            "left_tail_sequence",
-            "right_tail_sequence",
-            "target_seq",
-            "allowed_rule",
-            "total_same_length_reads",
-            "wt_reads",
-            "wt_pct",
-            "edited_reads_allowed_only",
-            "edited_pct_allowed_only",
-            "disallowed_mut_reads",
-            "disallowed_mut_pct",
-            "same_length_file",
-        ],
-    )
-    write_tsv(
-        ranked_path,
-        ranked_rows,
-        [
-            "sample_id",
-            "tail_combo",
-            "left_tail_module",
-            "right_tail_module",
-            "target_seq",
-            "edited_reads_allowed_only",
-            "total_same_length_reads",
-            "edited_pct_allowed_only",
-            "disallowed_mut_pct",
-        ],
-    )
-    write_tsv(
-        render_path,
-        render_rows,
-        [
-            "sample_id",
-            "tail_combo",
-            "left_tail_module",
-            "right_tail_module",
-            "target_seq",
-            "rank",
-            "haplotype",
-            "reads",
-            "edited_reads_percent",
-            "primary_label",
-            "primary_pct",
-            "secondary_label",
-            "secondary_pct",
-            "same_length_total",
-        ],
-    )
-    html_title = f"{preset.label} Haplotype View ({cfg.target_seq})"
-    html_path.write_text(render_html(per_sample_rows=per_sample_rows, render_rows=render_rows, title=html_title))
+    if preset.analysis_family == "prime_editing":
+        per_sample_rows, allele_rows, scaffold_rows = build_prime_sample_reports(
+            run_rows=run_rows,
+            desired_products=cfg.desired_products,
+            scaffold_sequence=cfg.scaffold_sequence,
+        )
+        pseudo_block = BlockSpec(
+            block_index=1,
+            block_name=sample_slug,
+            sample_spec=_format_id_spec(tuple(selected_ids)),
+            full_sequence=seq_map[selected_ids[0]]["sequence"] if selected_ids else cfg.target_seq,
+            target_window=cfg.target_seq,
+            row_items=tuple((f"sample {sample_id}", sample_id) for sample_id in selected_ids),
+            desired_products=cfg.desired_products,
+            scaffold_sequence=cfg.scaffold_sequence,
+        )
+        heatmap_rows, heatmap_details, heatmap_columns = build_prime_heatmap_tables(
+            block=pseudo_block,
+            run_rows=run_rows,
+        )
+        per_sample_by_id = {int(row["sample_id"]): row for row in per_sample_rows}
+        ordered_per_sample_rows = [
+            per_sample_by_id[sample_id]
+            for _, sample_id in pseudo_block.row_items
+            if sample_id in per_sample_by_id
+        ]
+        per_sample_path = dirs["tables"] / f"sample_editing_{sample_slug}_{cfg.date_tag}.tsv"
+        allele_path = dirs["tables"] / f"prime_allele_classes_{sample_slug}_{cfg.date_tag}.tsv"
+        scaffold_path = dirs["tables"] / f"prime_scaffold_matches_{sample_slug}_{cfg.date_tag}.tsv"
+        heatmap_matrix_path = dirs["tables"] / f"heatmap_matrix_{sample_slug}_{cfg.date_tag}.tsv"
+        heatmap_detail_path = dirs["tables"] / f"heatmap_detail_{sample_slug}_{cfg.date_tag}.tsv"
+        html_path = dirs["tables"] / f"prime_report_{sample_slug}_{cfg.date_tag}.html"
 
-    outputs_for_flow = [
-        merge_path,
-        run_status_path,
-        skipped_path,
-        edited_path,
-        miseq_path,
-        per_sample_path,
-        ranked_path,
-        render_path,
-        html_path,
-    ]
-
-    if tail_all_rows:
-        tail_all_path = dirs["tables"] / f"sample_tail_mapping_from_excel_{cfg.date_tag}.tsv"
-        tail_scope_path = dirs["tables"] / f"sample_tail_mapping_analysis_scope_{cfg.date_tag}.tsv"
         write_tsv(
-            tail_all_path,
-            tail_all_rows,
+            per_sample_path,
+            ordered_per_sample_rows,
             [
                 "sample_id",
-                "tail_combo",
-                "left_tail_module",
-                "right_tail_module",
-                "left_tail_index",
-                "right_tail_index",
-                "left_tail_sequence",
-                "right_tail_sequence",
+                "replicate",
+                "condition",
+                "s_index",
+                "target_seq",
+                "desired_products",
+                "scaffold_sequence",
+                "total_analyzed_reads",
+                "same_length_total_reads",
+                "wt_reads",
+                "wt_pct",
+                "exact_intended_reads",
+                "exact_intended_pct",
+                "intended_plus_extra_reads",
+                "intended_plus_extra_pct",
+                "other_substitution_byproduct_reads",
+                "other_substitution_byproduct_pct",
+                "scaffold_derived_reads",
+                "scaffold_derived_pct",
+                "indel_only_reads",
+                "indel_only_pct",
+                "prime_edited_total_reads",
+                "prime_edited_total_pct",
+                "edit_to_indel_ratio",
+                "product_purity_pct",
+                "all_file",
+                "same_length_file",
             ],
         )
         write_tsv(
-            tail_scope_path,
-            tail_scope_rows,
+            allele_path,
+            allele_rows,
             [
                 "sample_id",
-                "tail_combo",
-                "left_tail_module",
-                "right_tail_module",
-                "left_tail_index",
-                "right_tail_index",
-                "left_tail_sequence",
-                "right_tail_sequence",
+                "target_seq",
+                "allele_class",
+                "allele_class_label",
+                "rank",
+                "allele_sequence",
+                "reads",
+                "allele_pct",
+                "desired_products",
+                "same_length",
             ],
         )
-        outputs_for_flow.extend([tail_all_path, tail_scope_path])
-
-    analysis_flow_path.write_text(
-        build_analysis_flow_markdown(
-            config=cfg,
+        if scaffold_rows:
+            write_tsv(scaffold_path, scaffold_rows, ["sample_id", "allele_sequence", "reads", "allele_class"])
+        matrix_fields = ["sample_id", "row_label", "row_key", "is_wt", "total_analyzed_reads"] + [
+            str(column["field"]) for column in heatmap_columns
+        ]
+        write_tsv(heatmap_matrix_path, heatmap_rows, matrix_fields)
+        write_tsv(
+            heatmap_detail_path,
+            heatmap_details,
+            [
+                "sample_id",
+                "row_label",
+                "row_key",
+                "is_wt",
+                "position",
+                "ref_base",
+                "intended_base",
+                "intended_reads",
+                "total_analyzed_reads",
+                "intended_pct",
+                "is_highlighted",
+            ],
+        )
+        html_title = f"{preset.label} Report ({cfg.target_seq})"
+        html_path.write_text(
+            render_prime_block_report_html(
+                title=html_title,
+                block=pseudo_block,
+                per_sample_rows=ordered_per_sample_rows,
+                allele_rows=allele_rows,
+                scaffold_rows=scaffold_rows,
+                heatmap_rows=heatmap_rows,
+                heatmap_columns=heatmap_columns,
+                heatmap_color_max_pct=cfg.heatmap_color_max_pct,
+            )
+        )
+        outputs_for_flow = [
+            merge_path,
+            run_status_path,
+            skipped_path,
+            edited_path,
+            miseq_path,
+            per_sample_path,
+            allele_path,
+            heatmap_matrix_path,
+            heatmap_detail_path,
+            html_path,
+        ]
+        if scaffold_rows:
+            outputs_for_flow.append(scaffold_path)
+        analysis_flow_path.write_text(
+            build_analysis_flow_markdown(
+                config=cfg,
+                preset=preset,
+                selected_sample_ids=selected_ids,
+                outputs=outputs_for_flow,
+                warnings=warnings,
+            )
+        )
+        key_paths = {
+            "run_dir": run_root,
+            "merge_stats": merge_path,
+            "run_status": run_status_path,
+            "edited_reads": edited_path,
+            "per_sample_editing": per_sample_path,
+            "prime_allele_classes": allele_path,
+            "heatmap_matrix": heatmap_matrix_path,
+            "html_report": html_path,
+            "analysis_flow": analysis_flow_path,
+        }
+        if scaffold_rows:
+            key_paths["prime_scaffold_matches"] = scaffold_path
+    else:
+        tail_all_rows, tail_scope_rows, tail_by_sample, tail_warnings = _load_tail_mapping_bundle(
+            cfg=cfg,
+            selected_ids=selected_ids,
+        )
+        warnings.extend(tail_warnings)
+        per_sample_rows, ranked_rows, render_rows = build_sample_reports(
+            run_rows=run_rows,
             preset=preset,
-            selected_sample_ids=selected_ids,
-            outputs=outputs_for_flow,
-            warnings=warnings,
+            tail_by_sample=tail_by_sample,
         )
-    )
 
-    key_paths = {
-        "run_dir": run_root,
-        "merge_stats": merge_path,
-        "run_status": run_status_path,
-        "edited_reads": edited_path,
-        "per_sample_editing": per_sample_path,
-        "ranked_haplotypes": ranked_path,
-        "render_rows": render_path,
-        "html_report": html_path,
-        "analysis_flow": analysis_flow_path,
-    }
+        per_sample_path = dirs["tables"] / f"sample_editing_{sample_slug}_{cfg.date_tag}.tsv"
+        ranked_path = dirs["tables"] / f"ranked_haplotypes_{sample_slug}_{cfg.date_tag}.tsv"
+        render_path = dirs["tables"] / f"haplotype_render_rows_{sample_slug}_{cfg.date_tag}.tsv"
+        html_path = dirs["tables"] / f"haplotype_colored_by_combo_{sample_slug}_{cfg.date_tag}.html"
+
+        write_tsv(
+            per_sample_path,
+            per_sample_rows,
+            [
+                "sample_id",
+                "replicate",
+                "condition",
+                "s_index",
+                "tail_combo",
+                "left_tail_module",
+                "right_tail_module",
+                "left_tail_sequence",
+                "right_tail_sequence",
+                "target_seq",
+                "allowed_rule",
+                "total_same_length_reads",
+                "wt_reads",
+                "wt_pct",
+                "edited_reads_allowed_only",
+                "edited_pct_allowed_only",
+                "disallowed_mut_reads",
+                "disallowed_mut_pct",
+                "same_length_file",
+            ],
+        )
+        write_tsv(
+            ranked_path,
+            ranked_rows,
+            [
+                "sample_id",
+                "tail_combo",
+                "left_tail_module",
+                "right_tail_module",
+                "target_seq",
+                "edited_reads_allowed_only",
+                "total_same_length_reads",
+                "edited_pct_allowed_only",
+                "disallowed_mut_pct",
+            ],
+        )
+        write_tsv(
+            render_path,
+            render_rows,
+            [
+                "sample_id",
+                "tail_combo",
+                "left_tail_module",
+                "right_tail_module",
+                "target_seq",
+                "rank",
+                "haplotype",
+                "reads",
+                "edited_reads_percent",
+                "primary_label",
+                "primary_pct",
+                "secondary_label",
+                "secondary_pct",
+                "same_length_total",
+            ],
+        )
+        html_title = f"{preset.label} Haplotype View ({cfg.target_seq})"
+        html_path.write_text(render_html(per_sample_rows=per_sample_rows, render_rows=render_rows, title=html_title))
+
+        outputs_for_flow = [
+            merge_path,
+            run_status_path,
+            skipped_path,
+            edited_path,
+            miseq_path,
+            per_sample_path,
+            ranked_path,
+            render_path,
+            html_path,
+        ]
+
+        if tail_all_rows:
+            tail_all_path = dirs["tables"] / f"sample_tail_mapping_from_excel_{cfg.date_tag}.tsv"
+            tail_scope_path = dirs["tables"] / f"sample_tail_mapping_analysis_scope_{cfg.date_tag}.tsv"
+            write_tsv(
+                tail_all_path,
+                tail_all_rows,
+                [
+                    "sample_id",
+                    "tail_combo",
+                    "left_tail_module",
+                    "right_tail_module",
+                    "left_tail_index",
+                    "right_tail_index",
+                    "left_tail_sequence",
+                    "right_tail_sequence",
+                ],
+            )
+            write_tsv(
+                tail_scope_path,
+                tail_scope_rows,
+                [
+                    "sample_id",
+                    "tail_combo",
+                    "left_tail_module",
+                    "right_tail_module",
+                    "left_tail_index",
+                    "right_tail_index",
+                    "left_tail_sequence",
+                    "right_tail_sequence",
+                ],
+            )
+            outputs_for_flow.extend([tail_all_path, tail_scope_path])
+
+        analysis_flow_path.write_text(
+            build_analysis_flow_markdown(
+                config=cfg,
+                preset=preset,
+                selected_sample_ids=selected_ids,
+                outputs=outputs_for_flow,
+                warnings=warnings,
+            )
+        )
+
+        key_paths = {
+            "run_dir": run_root,
+            "merge_stats": merge_path,
+            "run_status": run_status_path,
+            "edited_reads": edited_path,
+            "per_sample_editing": per_sample_path,
+            "ranked_haplotypes": ranked_path,
+            "render_rows": render_path,
+            "html_report": html_path,
+            "analysis_flow": analysis_flow_path,
+        }
 
     _log(logger, f"Analysis completed: {run_root}")
     return RunResult(
@@ -747,22 +984,7 @@ def _run_block_heatmap_analysis(cfg: AnalysisConfig, validation: ValidationResul
         write_tsv(
             run_status_path,
             run_rows,
-            [
-                "sample_id",
-                "replicate",
-                "condition",
-                "s_index",
-                "aseq",
-                "rgen",
-                "return_code",
-                "summary_file",
-                "summary_exists",
-                "window_file",
-                "window_exists",
-                "same_length_file",
-                "same_length_exists",
-                "log_file",
-            ],
+            RUN_STATUS_FIELDS,
         )
         write_tsv(skipped_path, [], ["sample_id", "reason"])
         write_tsv(
@@ -787,150 +1009,287 @@ def _run_block_heatmap_analysis(cfg: AnalysisConfig, validation: ValidationResul
         )
         build_miseq_summary_table(run_rows, miseq_path)
 
-        _, _, tail_by_sample, tail_warnings = _load_tail_mapping_bundle(cfg=cfg, selected_ids=block_ids)
-        warnings.extend(tail_warnings)
-        per_sample_rows, ranked_rows, render_rows = build_sample_reports(
-            run_rows=run_rows,
-            preset=preset,
-            tail_by_sample=tail_by_sample,
-        )
+        if preset.analysis_family == "prime_editing":
+            per_sample_rows, allele_rows, scaffold_rows = build_prime_sample_reports(
+                run_rows=run_rows,
+                desired_products=block.desired_products,
+                scaffold_sequence=block.scaffold_sequence,
+            )
+            per_sample_by_id = {int(row["sample_id"]): row for row in per_sample_rows}
+            ordered_per_sample_rows = [
+                per_sample_by_id[sample_id]
+                for _, sample_id in block.row_items
+                if sample_id in per_sample_by_id
+            ]
+            heatmap_rows, heatmap_details, heatmap_columns = build_prime_heatmap_tables(
+                block=block,
+                run_rows=run_rows,
+            )
 
-        per_sample_by_id = {int(row["sample_id"]): row for row in per_sample_rows}
-        ordered_per_sample_rows = [
-            per_sample_by_id[sample_id]
-            for _, sample_id in block.row_items
-            if sample_id in per_sample_by_id
-        ]
-        heatmap_rows, heatmap_details, heatmap_columns = build_heatmap_tables(
-            block=block,
-            preset=preset,
-            run_rows=run_rows,
-        )
+            per_sample_path = _path_with_prefix(dirs["tables"], "sample_editing", cfg.date_tag, block_slug, "tsv")
+            allele_path = _path_with_prefix(dirs["tables"], "prime_allele_classes", cfg.date_tag, block_slug, "tsv")
+            scaffold_path = _path_with_prefix(dirs["tables"], "prime_scaffold_matches", cfg.date_tag, block_slug, "tsv")
+            heatmap_matrix_path = _path_with_prefix(dirs["tables"], "heatmap_matrix", cfg.date_tag, block_slug, "tsv")
+            heatmap_detail_path = _path_with_prefix(dirs["tables"], "heatmap_detail", cfg.date_tag, block_slug, "tsv")
+            report_path = _path_with_prefix(dirs["tables"], "report", cfg.date_tag, block_slug, "html")
 
-        per_sample_path = _path_with_prefix(dirs["tables"], "sample_editing", cfg.date_tag, block_slug, "tsv")
-        ranked_path = _path_with_prefix(dirs["tables"], "ranked_haplotypes", cfg.date_tag, block_slug, "tsv")
-        render_path = _path_with_prefix(dirs["tables"], "haplotype_render_rows", cfg.date_tag, block_slug, "tsv")
-        heatmap_matrix_path = _path_with_prefix(dirs["tables"], "heatmap_matrix", cfg.date_tag, block_slug, "tsv")
-        heatmap_detail_path = _path_with_prefix(dirs["tables"], "heatmap_detail", cfg.date_tag, block_slug, "tsv")
-        report_path = _path_with_prefix(dirs["tables"], "report", cfg.date_tag, block_slug, "html")
+            write_tsv(
+                per_sample_path,
+                ordered_per_sample_rows,
+                [
+                    "sample_id",
+                    "replicate",
+                    "condition",
+                    "s_index",
+                    "target_seq",
+                    "desired_products",
+                    "scaffold_sequence",
+                    "total_analyzed_reads",
+                    "same_length_total_reads",
+                    "wt_reads",
+                    "wt_pct",
+                    "exact_intended_reads",
+                    "exact_intended_pct",
+                    "intended_plus_extra_reads",
+                    "intended_plus_extra_pct",
+                    "other_substitution_byproduct_reads",
+                    "other_substitution_byproduct_pct",
+                    "scaffold_derived_reads",
+                    "scaffold_derived_pct",
+                    "indel_only_reads",
+                    "indel_only_pct",
+                    "prime_edited_total_reads",
+                    "prime_edited_total_pct",
+                    "edit_to_indel_ratio",
+                    "product_purity_pct",
+                    "all_file",
+                    "same_length_file",
+                ],
+            )
+            write_tsv(
+                allele_path,
+                allele_rows,
+                [
+                    "sample_id",
+                    "target_seq",
+                    "allele_class",
+                    "allele_class_label",
+                    "rank",
+                    "allele_sequence",
+                    "reads",
+                    "allele_pct",
+                    "desired_products",
+                    "same_length",
+                ],
+            )
+            if scaffold_rows:
+                write_tsv(scaffold_path, scaffold_rows, ["sample_id", "allele_sequence", "reads", "allele_class"])
 
-        write_tsv(
-            per_sample_path,
-            ordered_per_sample_rows,
-            [
-                "sample_id",
-                "replicate",
-                "condition",
-                "s_index",
-                "tail_combo",
-                "left_tail_module",
-                "right_tail_module",
-                "left_tail_sequence",
-                "right_tail_sequence",
-                "target_seq",
-                "allowed_rule",
-                "total_same_length_reads",
-                "wt_reads",
-                "wt_pct",
-                "edited_reads_allowed_only",
-                "edited_pct_allowed_only",
-                "disallowed_mut_reads",
-                "disallowed_mut_pct",
-                "same_length_file",
-            ],
-        )
-        write_tsv(
-            ranked_path,
-            ranked_rows,
-            [
-                "sample_id",
-                "tail_combo",
-                "left_tail_module",
-                "right_tail_module",
-                "target_seq",
-                "edited_reads_allowed_only",
-                "total_same_length_reads",
-                "edited_pct_allowed_only",
-                "disallowed_mut_pct",
-            ],
-        )
-        write_tsv(
-            render_path,
-            render_rows,
-            [
-                "sample_id",
-                "tail_combo",
-                "left_tail_module",
-                "right_tail_module",
-                "target_seq",
-                "rank",
-                "haplotype",
-                "reads",
-                "edited_reads_percent",
-                "primary_label",
-                "primary_pct",
-                "secondary_label",
-                "secondary_pct",
-                "same_length_total",
-            ],
-        )
+            matrix_fields = ["sample_id", "row_label", "row_key", "is_wt", "total_analyzed_reads"] + [
+                str(column["field"]) for column in heatmap_columns
+            ]
+            write_tsv(heatmap_matrix_path, heatmap_rows, matrix_fields)
+            write_tsv(
+                heatmap_detail_path,
+                heatmap_details,
+                [
+                    "sample_id",
+                    "row_label",
+                    "row_key",
+                    "is_wt",
+                    "position",
+                    "ref_base",
+                    "intended_base",
+                    "intended_reads",
+                    "total_analyzed_reads",
+                    "intended_pct",
+                    "is_highlighted",
+                ],
+            )
 
-        matrix_fields = ["sample_id", "row_label", "row_key", "is_wt", "total_same_length_reads"] + [
-            str(column["field"]) for column in heatmap_columns
-        ]
-        write_tsv(heatmap_matrix_path, heatmap_rows, matrix_fields)
-        write_tsv(
-            heatmap_detail_path,
-            heatmap_details,
-            [
-                "sample_id",
-                "row_label",
-                "row_key",
-                "is_wt",
-                "position",
-                "ref_base",
-                "intended_base",
-                "intended_reads",
-                "total_same_length_reads",
-                "intended_pct",
-                "is_highlighted",
-            ],
-        )
+            report_title = f"{block.display_name} Prime Editing Report"
+            report_path.write_text(
+                render_prime_block_report_html(
+                    title=report_title,
+                    block=block,
+                    per_sample_rows=ordered_per_sample_rows,
+                    allele_rows=allele_rows,
+                    scaffold_rows=scaffold_rows,
+                    heatmap_rows=heatmap_rows,
+                    heatmap_columns=heatmap_columns,
+                    heatmap_color_max_pct=cfg.heatmap_color_max_pct,
+                )
+            )
 
-        report_title = f"{block.display_name} MAUND Report"
-        report_path.write_text(
-            render_block_report_html(
-                title=report_title,
+            key_paths[f"report_{block_slug}"] = report_path
+            key_paths[f"heatmap_matrix_{block_slug}"] = heatmap_matrix_path
+            key_paths[f"per_sample_editing_{block_slug}"] = per_sample_path
+            key_paths[f"prime_allele_classes_{block_slug}"] = allele_path
+            if scaffold_rows:
+                key_paths[f"prime_scaffold_matches_{block_slug}"] = scaffold_path
+            all_outputs.extend(
+                [
+                    merge_path,
+                    run_status_path,
+                    skipped_path,
+                    edited_path,
+                    mapping_path,
+                    miseq_path,
+                    per_sample_path,
+                    allele_path,
+                    heatmap_matrix_path,
+                    heatmap_detail_path,
+                    report_path,
+                ]
+            )
+            if scaffold_rows:
+                all_outputs.append(scaffold_path)
+        else:
+            _, _, tail_by_sample, tail_warnings = _load_tail_mapping_bundle(cfg=cfg, selected_ids=block_ids)
+            warnings.extend(tail_warnings)
+            per_sample_rows, ranked_rows, render_rows = build_sample_reports(
+                run_rows=run_rows,
+                preset=preset,
+                tail_by_sample=tail_by_sample,
+            )
+
+            per_sample_by_id = {int(row["sample_id"]): row for row in per_sample_rows}
+            ordered_per_sample_rows = [
+                per_sample_by_id[sample_id]
+                for _, sample_id in block.row_items
+                if sample_id in per_sample_by_id
+            ]
+            heatmap_rows, heatmap_details, heatmap_columns = build_heatmap_tables(
                 block=block,
                 preset=preset,
-                per_sample_rows=ordered_per_sample_rows,
-                ranked_rows=ranked_rows,
-                render_rows=render_rows,
-                heatmap_rows=heatmap_rows,
-                heatmap_columns=heatmap_columns,
-                heatmap_color_max_pct=cfg.heatmap_color_max_pct,
+                run_rows=run_rows,
             )
-        )
 
-        key_paths[f"report_{block_slug}"] = report_path
-        key_paths[f"heatmap_matrix_{block_slug}"] = heatmap_matrix_path
-        key_paths[f"per_sample_editing_{block_slug}"] = per_sample_path
-        all_outputs.extend(
-            [
-                merge_path,
-                run_status_path,
-                skipped_path,
-                edited_path,
-                mapping_path,
-                miseq_path,
+            per_sample_path = _path_with_prefix(dirs["tables"], "sample_editing", cfg.date_tag, block_slug, "tsv")
+            ranked_path = _path_with_prefix(dirs["tables"], "ranked_haplotypes", cfg.date_tag, block_slug, "tsv")
+            render_path = _path_with_prefix(dirs["tables"], "haplotype_render_rows", cfg.date_tag, block_slug, "tsv")
+            heatmap_matrix_path = _path_with_prefix(dirs["tables"], "heatmap_matrix", cfg.date_tag, block_slug, "tsv")
+            heatmap_detail_path = _path_with_prefix(dirs["tables"], "heatmap_detail", cfg.date_tag, block_slug, "tsv")
+            report_path = _path_with_prefix(dirs["tables"], "report", cfg.date_tag, block_slug, "html")
+
+            write_tsv(
                 per_sample_path,
+                ordered_per_sample_rows,
+                [
+                    "sample_id",
+                    "replicate",
+                    "condition",
+                    "s_index",
+                    "tail_combo",
+                    "left_tail_module",
+                    "right_tail_module",
+                    "left_tail_sequence",
+                    "right_tail_sequence",
+                    "target_seq",
+                    "allowed_rule",
+                    "total_same_length_reads",
+                    "wt_reads",
+                    "wt_pct",
+                    "edited_reads_allowed_only",
+                    "edited_pct_allowed_only",
+                    "disallowed_mut_reads",
+                    "disallowed_mut_pct",
+                    "same_length_file",
+                ],
+            )
+            write_tsv(
                 ranked_path,
+                ranked_rows,
+                [
+                    "sample_id",
+                    "tail_combo",
+                    "left_tail_module",
+                    "right_tail_module",
+                    "target_seq",
+                    "edited_reads_allowed_only",
+                    "total_same_length_reads",
+                    "edited_pct_allowed_only",
+                    "disallowed_mut_pct",
+                ],
+            )
+            write_tsv(
                 render_path,
-                heatmap_matrix_path,
-                heatmap_detail_path,
-                report_path,
+                render_rows,
+                [
+                    "sample_id",
+                    "tail_combo",
+                    "left_tail_module",
+                    "right_tail_module",
+                    "target_seq",
+                    "rank",
+                    "haplotype",
+                    "reads",
+                    "edited_reads_percent",
+                    "primary_label",
+                    "primary_pct",
+                    "secondary_label",
+                    "secondary_pct",
+                    "same_length_total",
+                ],
+            )
+
+            matrix_fields = ["sample_id", "row_label", "row_key", "is_wt", "total_same_length_reads"] + [
+                str(column["field"]) for column in heatmap_columns
             ]
-        )
+            write_tsv(heatmap_matrix_path, heatmap_rows, matrix_fields)
+            write_tsv(
+                heatmap_detail_path,
+                heatmap_details,
+                [
+                    "sample_id",
+                    "row_label",
+                    "row_key",
+                    "is_wt",
+                    "position",
+                    "ref_base",
+                    "intended_base",
+                    "intended_reads",
+                    "total_same_length_reads",
+                    "intended_pct",
+                    "is_highlighted",
+                ],
+            )
+
+            report_title = f"{block.display_name} MAUND Report"
+            report_path.write_text(
+                render_block_report_html(
+                    title=report_title,
+                    block=block,
+                    preset=preset,
+                    per_sample_rows=ordered_per_sample_rows,
+                    ranked_rows=ranked_rows,
+                    render_rows=render_rows,
+                    heatmap_rows=heatmap_rows,
+                    heatmap_columns=heatmap_columns,
+                    heatmap_color_max_pct=cfg.heatmap_color_max_pct,
+                )
+            )
+
+            key_paths[f"report_{block_slug}"] = report_path
+            key_paths[f"heatmap_matrix_{block_slug}"] = heatmap_matrix_path
+            key_paths[f"per_sample_editing_{block_slug}"] = per_sample_path
+            all_outputs.extend(
+                [
+                    merge_path,
+                    run_status_path,
+                    skipped_path,
+                    edited_path,
+                    mapping_path,
+                    miseq_path,
+                    per_sample_path,
+                    ranked_path,
+                    render_path,
+                    heatmap_matrix_path,
+                    heatmap_detail_path,
+                    report_path,
+                ]
+            )
+
         block_summaries.append(
             f"{block.display_name}: {block.sample_spec} | target={block.target_window} | desired={', '.join(block.desired_products) or 'not provided'}"
         )
